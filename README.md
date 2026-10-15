@@ -3,6 +3,8 @@
 Remote-MCP-Server (HTTPS), der ClickUp-Brain und Super Agents Zugriff auf Onshape gibt – Lesen **und** Modellieren, aber abgesichert.
 Die eigentlichen Onshape-Tools stammen unverändert aus [hedless/onshape-mcp](https://github.com/hedless/onshape-mcp) (MIT, Commit `a9c2a5e`, siehe `NOTICE`). Darum herum liegt eine Sicherheitsschicht.
 
+**Anwender- und Betriebsdokumentation:** [docs/DOKUMENTATION.md](docs/DOKUMENTATION.md)
+
 ## Was gegenüber dem Original abgesichert ist
 
 | Problem im Original | Lösung hier |

@@ -21,3 +21,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-h-5-h-6-h-7-call-scope-data-dir.md`
   summary: Volles Volume (ENOSPC) lässt die H-7-Probe scheitern; der Server startet nicht, und das Aufräumen, das Platz schaffen würde, läuft erst nach dem Start.
   evidence: `_check_data_dir` vor `_cleanup_files`; Datei-Cache ist auf 500 MB von 1 GB begrenzt, Bilder/Links nur per TTL – daher unwahrscheinlich. Fix: vor der Probe abgelaufene Dateien löschen oder ENOSPC gesondert melden (Code-Review Edge Case Hunter).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-h-2-h-3-mapping-ownership.md`
+  summary: Nach Release-Webhook (löscht alle `latest`-Zeilen der Nummer) oder abgelaufener TTL kann eine gleichnamige Zeichnung den untypisierten Zeiger übernehmen; `find_part_by_number` ohne Typ liefert dann die Zeichnung, bis eine typisierte Teile-Suche läuft.
+  evidence: Vorbestehend (alter Sync und Lookup gleich); Teil-Vorrang über Invalidierung hinweg bräuchte einen Onshape-Call oder Rückgriff auf eine ungeprüfte Revision aus `revisions`. Code-Review H-2/H-3 (Blind Hunter, Edge Case Hunter).

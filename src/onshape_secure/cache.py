@@ -23,7 +23,7 @@ from starlette.responses import Response
 
 
 class KVCache:
-    """Small JSON key/value store with per-entry expiry (company id, revisions, pending jobs)."""
+    """JSON key/value store with expiry: metadata under immutable IDs (version, release package), jobs (AD-12)."""
 
     MAX_ENTRIES = 5000
 

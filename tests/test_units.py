@@ -429,7 +429,7 @@ async def test_own_tool_registration_lists_agree():
 
     schemas = [t.name for t in TOOLS]
     assert len(schemas) == len(set(schemas)), "duplicate tool in extra_tools.TOOLS"
-    handlers = set(ExtraTools(client=None, check_read=None).handlers())
+    handlers = set(ExtraTools(client=None, check_read=None, mapping=None).handlers())
     assert handlers == EXTRA_TOOL_NAMES, handlers ^ EXTRA_TOOL_NAMES
     assert set(schemas) <= EXTRA_TOOL_NAMES, set(schemas) - EXTRA_TOOL_NAMES
     assert EXTRA_TOOL_NAMES <= set(TOOL_CLASSES), EXTRA_TOOL_NAMES - set(TOOL_CLASSES)
@@ -633,3 +633,200 @@ def test_nothing_reaches_onshape_around_the_client_methods():
     app_src = (root / "onshape_secure/app.py").read_text("utf-8")
     get_bytes = app_src[app_src.index("    async def get_bytes("):app_src.index('return await _send("get", path, download)')]
     assert [line for f, line in hits if f == "onshape_secure/app.py" and line not in get_bytes] == []
+
+
+# --- H-2 / H-3: the mapping DB owns part data, one writer per row kind (AD-6, AD-12) ----
+
+_HEX = "a" * 24
+_PART = {"partNumber": "PRT-1", "revision": "A", "elementType": 0, "name": "Bracket",
+         "documentId": _HEX, "versionId": "9" * 24, "elementId": "e" * 24, "partId": "JHD"}
+_DRAWING = {"partNumber": "PRT-1", "revision": "B", "elementType": 2, "name": "Bracket drawing",
+            "documentId": _HEX, "versionId": "8" * 24, "elementId": "6" * 24}
+
+
+def _rows(m):
+    latest = m._q("SELECT part_number, type_key, revision, element_type FROM latest ORDER BY type_key")
+    revisions = m._q("SELECT part_number, revision, element_type, info FROM revisions ORDER BY element_type")
+    return latest, revisions
+
+
+@pytest.mark.parametrize("drawing_first", [False, True])
+def test_sync_and_lookup_write_identical_rows(tmp_path, drawing_first):
+    """H-3: sync and on-demand lookup resolve the untyped latest pointer by the same rule."""
+    from onshape_secure.mapping import MappingStore
+
+    synced = MappingStore(str(tmp_path / "sync.db"))
+    looked_up = MappingStore(str(tmp_path / "lookup.db"))
+    order = [_DRAWING, _PART] if drawing_first else [_PART, _DRAWING]
+    for info in order:
+        synced.put_synced_revision(info)
+    # on-demand: the untyped lookup returns the first item, a typed lookup (_model_revision / drawing) the other
+    looked_up.put_revision("PRT-1", None, None, order[0])
+    looked_up.put_revision("PRT-1", None, order[1]["elementType"], order[1])
+    assert _rows(synced) == _rows(looked_up)
+    latest, _ = _rows(synced)
+    assert ("PRT-1", "", "A", 0) in latest  # untyped lookups prefer the part over the drawing
+    assert synced.get_revision("PRT-1", None, None)["elementType"] == 0
+    assert synced.get_revision("PRT-1", None, 2)["revision"] == "B"
+
+
+def test_untyped_lookup_also_answers_typed_lookup(tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    m.put_revision("PRT-1", None, None, _PART)
+    assert m.get_revision("PRT-1", None, 0)["revision"] == "A"  # no second Onshape call for the typed lookup
+
+
+def test_stale_part_pointer_yields_to_new_drawing(tmp_path):
+    import time as _t
+
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    m.put_revision("PRT-1", None, None, _PART)
+    m.put_revision("PRT-1", None, None, _DRAWING)  # fresh part pointer wins
+    assert m.get_revision("PRT-1", None, None)["elementType"] == 0
+    m._q("UPDATE latest SET checked_at=?", (_t.time() - 2 * 3600,))  # older than the 1 h TTL
+    m.put_revision("PRT-1", None, None, _DRAWING)  # Onshape's answer after expiry is kept: no refetch loop
+    assert m.get_revision("PRT-1", None, None)["elementType"] == 2
+    m.put_revision("PRT-1", None, 0, _PART)  # the next typed lookup of the part restores the preference
+    assert m.get_revision("PRT-1", None, None)["elementType"] == 0
+
+
+def test_not_found_marker_only_for_requested_latest_key(tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    m.put_revision("PRT-1", None, 2, {"notFound": True})
+    assert m.get_revision("PRT-1", None, 2) == {"notFound": True}
+    assert m.get_revision("PRT-1", None, None) is None
+    m.put_revision("PRT-1", "C", None, {"notFound": True})  # fixed-revision misses are not stored
+    assert m._q("SELECT COUNT(*) FROM latest")[0][0] == 1
+    m.put_revision("PRT-1", None, None, {"notFound": True})
+    m.put_synced_revision(_DRAWING)  # a not-found marker never blocks a real answer
+    assert m.get_revision("PRT-1", None, None)["elementType"] == 2
+    assert m.get_revision("PRT-1", None, 2)["revision"] == "B"
+
+
+def test_typed_request_answered_with_other_type(tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    asm = {**_PART, "elementType": 1}
+    m.put_revision("PRT-1", None, 0, asm)  # asked for a part studio, Onshape answered with the assembly
+    assert m.get_revision("PRT-1", None, 0)["elementType"] == 1  # the request is answered from the table
+    assert m.get_revision("PRT-1", None, 1)["elementType"] == 1
+    assert m.get_revision("PRT-1", None, None)["elementType"] == 1
+
+
+def test_mapping_rows_mark_latest_per_element_type(tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    m.put_synced_revision(_PART)
+    m.put_synced_revision(_DRAWING)
+    m.put_revision("PRT-1", "0", None, {**_PART, "revision": "0"})  # an older, fixed part revision
+    assert {(r["revision"], r["type"], r["latest"]) for r in m.rows("PRT-1")} == {
+        ("0", "PART", False), ("A", "PART", True), ("B", "DRAWING", True)}
+    assert [p["revision"] for p in m.released_parts()] == ["A"]
+
+
+def test_legacy_untyped_pointer_still_counts_as_latest(tmp_path):
+    """Rows written before H-3 (on-demand, untyped pointer only) keep working without a rebuild."""
+    import time as _t
+
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    m._q("INSERT INTO revisions VALUES (?, ?, ?, ?, ?)", ("PRT-1", "A", 0, json.dumps(_PART), _t.time()))
+    m._q("INSERT INTO latest VALUES ('PRT-1', '', 'A', 0, ?)", (_t.time(),))
+    assert m.get_revision("PRT-1", None, None)["revision"] == "A"
+    assert m.rows("PRT-1")[0]["latest"] is True and len(m.released_parts()) == 1
+
+
+def test_disagreeing_pointers_mark_only_the_newest_revision_latest(tmp_path):
+    """Legacy DB without webhook: typed pointer still names B, a newer untyped lookup found C."""
+    import time as _t
+
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    now = _t.time()
+    for rev in ("B", "C"):
+        m._q("INSERT INTO revisions VALUES (?, ?, ?, ?, ?)",
+             ("PRT-1", rev, 0, json.dumps({**_PART, "revision": rev}), now))
+    m._q("INSERT INTO latest VALUES ('PRT-1', '0', 'B', 0, ?)", (now - 7200,))
+    m._q("INSERT INTO latest VALUES ('PRT-1', '', 'C', 0, ?)", (now,))
+    assert [(r["revision"], r["latest"]) for r in m.rows("PRT-1")] == [("B", False), ("C", True)]
+    assert [p["revision"] for p in m.released_parts()] == ["C"]  # link_drawings spends no call on B
+
+
+def test_whereused_miss_lives_in_mapping_db(tmp_path):
+    import time as _t
+
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    assert not m.whereused_miss("PRT-9")
+    m.put_whereused_miss("PRT-9")
+    assert m.whereused_miss("PRT-9")
+    m._q("UPDATE whereused_misses SET checked_at=?", (_t.time() - 2 * 3600,))
+    assert not m.whereused_miss("PRT-9")  # 1 h TTL
+    m.put_whereused_miss("PRT-8")  # writing purges expired rows: no unbounded growth
+    assert [r[0] for r in m._q("SELECT part_number FROM whereused_misses")] == ["PRT-8"]
+    m.on_revision_created("PRT-8", 0)  # a release of that number may make it findable
+    assert not m.whereused_miss("PRT-8")
+    m.put_whereused_miss("PRT-7")
+    m.on_revision_created(None, None)  # event without part number / workflow / lost webhook: full invalidation
+    assert not m.whereused_miss("PRT-7")
+    m.put_whereused_miss("PRT-6")
+    m.invalidate_all()
+    assert not m.whereused_miss("PRT-6")
+
+
+def test_workspace_index_never_reports_release_status(tmp_path):
+    """AD-6: release status and released revision come only from revisions/latest, never from ws_parts."""
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    m.set_doc_workspace(_HEX, "b" * 24, "Doc")
+    m.replace_ws_parts(_HEX, "b" * 24, [{"partNumber": "PRT-2", "elementId": "e" * 24, "partId": "JKD",
+                                         "name": "Pin", "state": "RELEASED", "revision": "C"}])
+    assert m._q("SELECT state, revision FROM ws_parts") == [(None, None)]
+    # legacy rows from before H-3 still carry a state: it is never read
+    m._q("INSERT INTO ws_parts VALUES ('PRT-3', ?, ?, ?, 'JLD', 'Nut', 'RELEASED', 'D')", (_HEX, "b" * 24, "e" * 24))
+    for hit in m.find_ws_part("PRT-3") + m.search_ws_parts("PRT"):
+        assert "state" not in hit and "revision" not in hit
+    ws_rows = [r for r in m.export_rows() if r["wvm"] == "w"]
+    assert {r["Teilenummer"] for r in ws_rows} == {"PRT-2", "PRT-3"}
+    assert all(r["Revision"] == "" and r["Status"].startswith("nicht freigegeben") for r in ws_rows)
+
+
+def test_extra_tools_require_the_mapping_store():
+    from onshape_secure.extra_tools import ExtraTools
+
+    with pytest.raises(TypeError):
+        ExtraTools(client=None, check_read=None)  # no "running without mapping DB" mode (H-2)
+
+
+async def test_company_id_moves_from_kv_into_mapping_meta(tmp_path):
+    from onshape_secure.cache import KVCache
+    from onshape_secure.extra_tools import ExtraTools
+    from onshape_secure.mapping import MappingStore
+
+    kv = KVCache(str(tmp_path / "cache.json"))
+    kv.set("company_id", "c0mpany")
+    m = MappingStore(str(tmp_path / "m.db"))
+    tools = ExtraTools(client=None, check_read=None, mapping=m, kv=kv)  # client=None: an API call would fail
+    assert await tools._company() == "c0mpany"
+    assert m.meta("company_id") == "c0mpany"
+
+
+def test_part_data_never_goes_to_the_kv_cache():
+    import pathlib
+
+    src = (pathlib.Path(__file__).parent.parent / "src/onshape_secure/extra_tools.py").read_text("utf-8")
+    assert not re.search(r"rev2:|whereused5|wu_pn_miss|mapping is None", src)
+    kv_writes = re.findall(r"self\.kv\.set\(\s*([^,]+),", src)
+    assert sorted(kv_writes) == ["key", "key", "pending_key"], kv_writes  # release package, version, pending job

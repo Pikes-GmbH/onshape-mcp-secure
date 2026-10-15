@@ -7,6 +7,8 @@ Tables
   meta       company id, webhook id/secret, timestamps
   ws_docs    documents whose working state is indexed (main workspace, freshness)
   ws_parts   part number -> part in the main workspace, also for parts that were never released
+             (its state/revision columns are legacy: release status comes only from revisions/latest)
+  whereused_misses  part numbers that company-wide Where Used did not find (short TTL)
 
 Without an active release webhook, "latest" pointers and drawing links fall back to a short TTL.
 """
@@ -24,8 +26,16 @@ from typing import Any
 FALLBACK_TTL = 3600  # without webhook: re-check latest revision / drawings after 1 h
 SAFETY_TTL = 30 * 86400  # with webhook: still re-check once a month
 NOT_FOUND_TTL = 3600
-WEBHOOK_HEALTH_MAX_AGE = 8 * 86400
-INDEX_VERSION = "2"  # v2: unnumbered parts are indexed too (name search)  # webhook must have been verified within this time
+WEBHOOK_HEALTH_MAX_AGE = 8 * 86400  # webhook must have been verified within this time
+INDEX_VERSION = "2"  # v2: unnumbered parts are indexed too (name search)
+DRAWING_TYPE = 2
+# a revision row is the latest one if the newest pointer (typed or untyped) of its number and type names it;
+# older pointers that disagree (legacy rows, pointers kept under another requested type) do not count
+_IS_LATEST = (
+    "EXISTS (SELECT 1 FROM latest l WHERE l.part_number=r.part_number AND l.revision=r.revision "
+    "AND l.element_type=r.element_type AND l.checked_at=(SELECT MAX(m.checked_at) FROM latest m "
+    "WHERE m.part_number=r.part_number AND m.element_type=r.element_type))"
+)
 
 
 class MappingStore:
@@ -55,6 +65,8 @@ class MappingStore:
                 part_number TEXT NOT NULL, document_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
                 element_id TEXT NOT NULL, part_id TEXT NOT NULL, name TEXT, state TEXT, revision TEXT,
                 PRIMARY KEY (part_number, document_id, element_id, part_id));
+            CREATE TABLE IF NOT EXISTS whereused_misses (
+                part_number TEXT PRIMARY KEY, checked_at REAL NOT NULL);
             """
         )
 
@@ -122,41 +134,62 @@ class MappingStore:
         rows = self._q(sql + " ORDER BY element_type LIMIT 1", args)
         return json.loads(rows[0][0]) if rows else None
 
-    def put_revision(self, part_number: str, requested_revision: str | None, element_type: int | None, info: dict) -> None:
-        now = time.time()
-        if info.get("notFound"):
-            if not requested_revision:
-                self._q(
-                    "INSERT OR REPLACE INTO latest VALUES (?, ?, NULL, NULL, ?)",
-                    (part_number, self._type_key(element_type), now),
-                )
-            return
+    # One writer per row kind (AD-6): on-demand lookups and the company-wide sync use the same rules.
+
+    def _write_revision_row(self, part_number: str, info: dict, now: float) -> tuple[str, int]:
         rev = str(info.get("revision") or "")
         etype = int(info.get("elementType") if info.get("elementType") is not None else -1)
         self._q(
             "INSERT OR REPLACE INTO revisions VALUES (?, ?, ?, ?, ?)",
             (part_number, rev, etype, json.dumps(info), now),
         )
-        if not requested_revision:
-            self._q(
-                "INSERT OR REPLACE INTO latest VALUES (?, ?, ?, ?, ?)",
-                (part_number, self._type_key(element_type), rev, etype, now),
+        return rev, etype
+
+    def _write_latest(
+        self, part_number: str, rev: str, etype: int, now: float, requested_key: str | None = None
+    ) -> None:
+        """Latest pointers: the item's own type, the requested type (if it differs) and, by one rule, untyped.
+
+        Untyped lookups prefer a part/assembly over a drawing with the same number: a drawing replaces the
+        untyped pointer only if that is empty, a not-found marker, a drawing, or older than the latest TTL
+        (an unverified part pointer is not kept alive; the next typed part lookup restores the preference).
+        """
+        for key in dict.fromkeys((str(etype), requested_key or str(etype))):
+            self._q("INSERT OR REPLACE INTO latest VALUES (?, ?, ?, ?, ?)", (part_number, key, rev, etype, now))
+        if etype == DRAWING_TYPE:
+            current = self._q(
+                "SELECT element_type, checked_at FROM latest WHERE part_number=? AND type_key=''", (part_number,)
             )
+            if current:
+                cur_type, checked = current[0]
+                if cur_type not in (None, DRAWING_TYPE) and now - checked <= self._latest_ttl():
+                    return
+        self._q("INSERT OR REPLACE INTO latest VALUES (?, '', ?, ?, ?)", (part_number, rev, etype, now))
+
+    def _write_not_found(self, part_number: str, type_key: str, now: float) -> None:
+        self._q("INSERT OR REPLACE INTO latest VALUES (?, ?, NULL, NULL, ?)", (part_number, type_key, now))
+
+    def put_revision(self, part_number: str, requested_revision: str | None, element_type: int | None, info: dict) -> None:
+        """Store the answer of an on-demand revision lookup (by part number, optionally revision/type)."""
+        now = time.time()
+        if info.get("notFound"):
+            if not requested_revision:
+                self._write_not_found(part_number, self._type_key(element_type), now)
+            return
+        rev, etype = self._write_revision_row(part_number, info, now)
+        if requested_revision:
+            return
+        # a typed request answered with another type is remembered under the requested key too
+        self._write_latest(part_number, rev, etype, now, None if element_type is None else str(element_type))
 
     def put_synced_revision(self, info: dict) -> None:
         """Store one latest revision from the company-wide enumeration (also sets 'latest' pointers)."""
         pn = str(info.get("partNumber") or "")
         if not pn:
             return
-        rev = str(info.get("revision") or "")
-        etype = int(info.get("elementType") if info.get("elementType") is not None else -1)
         now = time.time()
-        self._q("INSERT OR REPLACE INTO revisions VALUES (?, ?, ?, ?, ?)", (pn, rev, etype, json.dumps(info), now))
-        self._q("INSERT OR REPLACE INTO latest VALUES (?, ?, ?, ?, ?)", (pn, str(etype), rev, etype, now))
-        # untyped lookups prefer parts/assemblies over a drawing with the same number
-        current = self._q("SELECT element_type FROM latest WHERE part_number=? AND type_key=''", (pn,))
-        if not current or current[0][0] in (None, 2) or etype != 2:
-            self._q("INSERT OR REPLACE INTO latest VALUES (?, '', ?, ?, ?)", (pn, rev, etype, now))
+        rev, etype = self._write_revision_row(pn, info, now)
+        self._write_latest(pn, rev, etype, now)
 
     def latest_drawing_for_element(self, document_id: str, element_id: str) -> dict | None:
         """Released drawing revision of a drawing tab, from synced data (no API call)."""
@@ -172,14 +205,24 @@ class MappingStore:
         """Latest released parts/assemblies (optionally of one document)."""
         out = []
         for pn, rev, etype, info in self._q(
-            "SELECT r.part_number, r.revision, r.element_type, r.info FROM revisions r JOIN latest l "
-            "ON l.part_number=r.part_number AND l.type_key=CAST(r.element_type AS TEXT) AND l.revision=r.revision "
-            "WHERE r.element_type IN (0, 1)"
+            f"SELECT r.part_number, r.revision, r.element_type, r.info FROM revisions r "
+            f"WHERE r.element_type IN (0, 1) AND {_IS_LATEST}"
         ):
             d = json.loads(info)
             if document_id is None or d.get("documentId") == document_id:
                 out.append(d)
         return out
+
+    # ---------------------------------------------------------------- where-used misses
+
+    def whereused_miss(self, part_number: str) -> bool:
+        rows = self._q("SELECT checked_at FROM whereused_misses WHERE part_number=?", (part_number,))
+        return bool(rows) and time.time() - rows[0][0] < NOT_FOUND_TTL
+
+    def put_whereused_miss(self, part_number: str) -> None:
+        now = time.time()
+        self._q("DELETE FROM whereused_misses WHERE checked_at < ?", (now - NOT_FOUND_TTL,))  # keep it small
+        self._q("INSERT OR REPLACE INTO whereused_misses VALUES (?, ?)", (part_number, now))
 
     # ---------------------------------------------------------------- drawings
 
@@ -206,12 +249,14 @@ class MappingStore:
         if part_number:
             self._q("DELETE FROM latest WHERE part_number=?", (part_number,))
             self._q("DELETE FROM drawings WHERE part_number=?", (part_number,))
+            self._q("DELETE FROM whereused_misses WHERE part_number=?", (part_number,))
         else:
             self.invalidate_all()
 
     def invalidate_all(self) -> None:
         self._q("DELETE FROM latest")
         self._q("DELETE FROM drawings")
+        self._q("DELETE FROM whereused_misses")
 
     # ---------------------------------------------------------------- workspace part-number index
 
@@ -253,12 +298,9 @@ class MappingStore:
             self._db.execute("BEGIN")
             self._db.execute("DELETE FROM ws_parts WHERE document_id=?", (document_id,))
             self._db.executemany(
-                "INSERT OR REPLACE INTO ws_parts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    (p["partNumber"], document_id, workspace_id, p["elementId"], p["partId"],
-                     p.get("name"), p.get("state"), p.get("revision"))
-                    for p in parts
-                ],
+                "INSERT OR REPLACE INTO ws_parts VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",  # no release status (AD-6)
+                [(p["partNumber"], document_id, workspace_id, p["elementId"], p["partId"], p.get("name"))
+                 for p in parts],
             )
             self._db.execute(
                 "UPDATE ws_docs SET indexed_at=?, dirty=0 WHERE document_id=?", (time.time(), document_id)
@@ -269,27 +311,27 @@ class MappingStore:
         if not part_number:
             return []
         rows = self._q(
-            "SELECT p.document_id, p.workspace_id, p.element_id, p.part_id, p.name, p.state, p.revision, d.name "
+            "SELECT p.document_id, p.workspace_id, p.element_id, p.part_id, p.name, d.name "
             "FROM ws_parts p LEFT JOIN ws_docs d ON d.document_id=p.document_id WHERE p.part_number=?",
             (part_number,),
         )
         return [
             {"documentId": r[0], "workspaceId": r[1], "elementId": r[2], "partId": r[3], "name": r[4],
-             "state": r[5], "revision": r[6], "documentName": r[7]}
+             "documentName": r[5]}
             for r in rows
         ]
 
     def search_ws_parts(self, text: str, limit: int = 20) -> list[dict]:
         like = f"%{text}%"
         rows = self._q(
-            "SELECT p.part_number, p.name, p.document_id, p.workspace_id, p.element_id, p.part_id, p.state, d.name "
+            "SELECT p.part_number, p.name, p.document_id, p.workspace_id, p.element_id, p.part_id, d.name "
             "FROM ws_parts p LEFT JOIN ws_docs d ON d.document_id=p.document_id "
             "WHERE p.name LIKE ? OR p.part_number LIKE ? ORDER BY p.part_number LIMIT ?",
             (like, like, limit),
         )
         return [
             {"partNumber": r[0], "name": r[1], "documentId": r[2], "workspaceId": r[3], "elementId": r[4],
-             "partId": r[5], "state": r[6], "documentName": r[7]}
+             "partId": r[5], "documentName": r[6]}
             for r in rows
         ]
 
@@ -336,14 +378,14 @@ class MappingStore:
                 "elementId": d.get("elementId") or "", "partId": d.get("partId") or "",
             })
         released = {r["Teilenummer"] for r in out}
-        for pn, did, wid, eid, pid, name, state, rev, dname in self._q(
-                "SELECT p.part_number, p.document_id, p.workspace_id, p.element_id, p.part_id, p.name, p.state, "
-                "p.revision, d.name FROM ws_parts p LEFT JOIN ws_docs d ON d.document_id=p.document_id "
+        for pn, did, wid, eid, pid, name, dname in self._q(
+                "SELECT p.part_number, p.document_id, p.workspace_id, p.element_id, p.part_id, p.name, "
+                "d.name FROM ws_parts p LEFT JOIN ws_docs d ON d.document_id=p.document_id "
                 "WHERE p.part_number<>'' ORDER BY p.part_number"):
             if pn in released:
                 continue
             out.append({
-                "Teilenummer": pn, "Revision": rev or "", "Typ": "Teil",
+                "Teilenummer": pn, "Revision": "", "Typ": "Teil",
                 "Status": "nicht freigegeben (Arbeitsstand)", "Aktuellste Revision": "",
                 "Name": name or "", "Dokument": dname or "", "Freigabe": "", "Zeichnung": "",
                 "documentId": did, "wvm": "w", "wvmId": wid, "elementId": eid, "partId": pid,
@@ -353,7 +395,7 @@ class MappingStore:
     def rows(self, part_number: str | None = None, limit: int = 50) -> list[dict]:
         sql = (
             "SELECT r.part_number, r.revision, r.element_type, r.info, "
-            "(SELECT l.revision FROM latest l WHERE l.part_number=r.part_number AND l.revision IS NOT NULL LIMIT 1), "
+            f"{_IS_LATEST}, "
             "(SELECT d.drawings FROM drawings d WHERE d.part_number=r.part_number AND d.part_revision=r.revision) "
             "FROM revisions r"
         )
@@ -363,13 +405,13 @@ class MappingStore:
             args = (part_number.replace("*", "%"),)
         sql += " ORDER BY r.part_number, r.revision LIMIT ?"
         out = []
-        for pn, rev, etype, info, latest, drawings in self._q(sql, args + (limit,)):
+        for pn, rev, etype, info, is_latest, drawings in self._q(sql, args + (limit,)):
             info = json.loads(info)
             out.append({
                 "partNumber": pn,
                 "revision": rev,
                 "type": {0: "PART", 1: "ASSEMBLY", 2: "DRAWING"}.get(etype, etype),
-                "latest": rev == latest,
+                "latest": bool(is_latest),
                 "name": info.get("name"),
                 "document": info.get("documentName"),
                 "drawings": [

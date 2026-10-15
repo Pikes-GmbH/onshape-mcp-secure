@@ -116,6 +116,9 @@ Der Server führt eine eigene Tabelle aller Freigaben, Zeichnungen und indexiert
 
 - Onshape meldet neue Freigaben und geänderte Teilenummern per Webhook. Der Server löscht dann gezielt die betroffenen Einträge. Meldungen zählen nicht gegen das Budget.
 - Feste Revisionen ändern sich nie und bleiben dauerhaft gespeichert.
+- Alle Teile-Daten (Revisionen, „letzte Revision“, Zeichnungs-Links, Fehltreffer) stehen nur in dieser Tabelle. Gibt es zu einer Nummer ein Teil und eine Zeichnung, liefert die Suche ohne Typ das Teil, solange dessen Eintrag gültig ist (Sammelabruf und Einzelsuche folgen derselben Regel). Nach einer neuen Freigabe oder Ablauf der Gültigkeit kann sie bis zur nächsten Teile-Suche die Zeichnung liefern; die Antwort nennt dann den Typ `DRAWING`.
+- Fehltreffer der firmenweiten Where-Used-Suche merkt sich der Server 1 Stunde.
+- In Zuordnungstabelle und Teile-Index kommen Freigabestatus und Revision nur aus den Freigaben; nicht freigegebene Teile zeigen keinen Status und keine Revision aus dem Arbeitsstand. (`get_parts` liest den Arbeitsstand live und zeigt dessen Werte.)
 - Einmal pro Woche prüft der Server mit 1 Aufruf, ob der Webhook noch lebt. Fällt er aus, wird stündlich neu geprüft.
 
 **Große Dateien:** STEP, PDF und Bilder bleiben 24 Stunden ab Erstellung auf dem Volume, dann werden sie gelöscht. Die täglichen Fly-Snapshots halten sie bis zu 5 Tage.

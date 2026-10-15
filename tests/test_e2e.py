@@ -868,6 +868,27 @@ async def test_unknown_part_number_stops_without_browsing(server):
     assert fake.index_calls == 1
 
 
+async def test_part_data_lives_only_in_mapping_db(server, tmp_path):
+    """H-2/H-3: lookups, drawing links and where-used misses go to mappings.db; KV holds no part data."""
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000900"})
+    await _call(base, "find_drawing_for_part", {"partNumber": "PRT-000900"})
+    unreleased = _json(await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"}))
+    assert "state" not in unreleased["matches"][0]  # Onshape said IN_PROGRESS: not a release status source
+    assert all("state" not in h for h in _json(await _call(base, "search_part_index", {"text": "Mitnehmer"})))
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-999999"})
+    kv_path = tmp_path / "cache.json"
+    kv = json.loads(kv_path.read_text("utf-8")) if kv_path.exists() else {}
+    assert not [k for k in kv if k.startswith(("rev2:", "whereused5:", "wu_pn_miss:"))], list(kv)
+    m = MappingStore(str(tmp_path / "mappings.db"))
+    assert m.whereused_miss("PRT-999999") and not m.whereused_miss("PRT-000583")
+    assert m.get_drawings("PRT-000900", "A") is not None
+    assert m.get_revision("PRT-000900", None, 0)["revision"] == "A"  # typed pointer from the untyped lookup
+    assert m.meta("company_id") == "c0mpany"
+
+
 async def test_metadata_webhook_marks_index_stale(server, tmp_path):
     from onshape_secure.mapping import MappingStore
 

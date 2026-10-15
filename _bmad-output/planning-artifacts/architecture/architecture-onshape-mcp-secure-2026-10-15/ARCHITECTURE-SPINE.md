@@ -243,8 +243,8 @@ docs/                 # Nutzer-Doku (Deutsch)
 | ID | Abweichung | Regel |
 | --- | --- | --- |
 | H-1 | Code-Defaults offen: `WRITE_MODE=allowlist`, `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT`, `ENABLE_LEGACY_SSE` = true; gesetztes `DISABLED_TOOLS` hebt Export-Sperre auf | AD-10, AD-5 |
-| H-2 | KV-Fallbacks für Teile-Daten in `_revision`, `_drawings_where_used`, `_locate_by_where_used` | AD-6, AD-12 |
-| H-3 | `put_revision` und `put_synced_revision` lösen `latest[pn,'']` unterschiedlich auf | AD-6 |
+| H-2 | **Erledigt 2026-10-15** (war: KV-Fallbacks für Teile-Daten in `_revision`, `_drawings_where_used`, `_locate_by_where_used`). Jetzt: `ExtraTools` verlangt die Mapping-DB; Where-Used-Fehltreffer in `whereused_misses` (1 h); Company-ID in `meta` (Alt-Wert aus KV wird übernommen) | AD-6, AD-12 |
+| H-3 | **Erledigt 2026-10-15** (war: `put_revision` und `put_synced_revision` lösten `latest[pn,'']` unterschiedlich auf). Jetzt: je eine Schreibfunktion für Revisionszeile, Latest-Zeiger, Not-found-Marker; Regel „Teil vor Zeichnung, außer der Teil-Zeiger ist älter als die Latest-TTL“ steht einmal in `_write_latest`; `ws_parts.state`/`revision` werden weder geschrieben noch gelesen | AD-6 |
 | H-4 | **Erledigt 2026-10-15** (war: `ping`/`register` setzten `webhook_verified_at`; Events ohne `webhookId` akzeptiert; Release-Events ohne `ws_docs`-dirty). Offen: Gate öffnet wieder, wenn der Webhook verschwindet (deferred-work.md); ob Release-Events `documentId` tragen, zeigt das Log-Feld `doc=yes/no` | AD-7 |
 | H-5 | **Erledigt 2026-10-15** (war: `fetch_document_name` umging `check_onshape_request`; nur get/post/delete gewrappt). Jetzt: ein `_send` für alle Verben, `get_bytes` und Namens-Lookup; Request ohne Call-Scope wird abgelehnt; unbekannte öffentliche Upstream-Client-Methode stoppt den Start | AD-3 |
 | H-6 | **Erledigt 2026-10-15** (war: Admin-Audit als Freitext; Kosten mal als Requests, mal als billed; Sync-Cooldown nur im Prozess). Jetzt: `_call_scope` für Tools, Admin und Webhook-Check-Job mit einer JSON-`AUDIT`-Zeile (`onshapeCalls` + `attempts`); Cooldown in `mappings.db` `meta` | AD-3, AD-8 |

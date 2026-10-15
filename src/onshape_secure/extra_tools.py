@@ -38,9 +38,6 @@ ELEMENT_NAMES = {PARTSTUDIO: "PARTSTUDIO", ASSEMBLY: "ASSEMBLY", DRAWING: "DRAWI
 # poll schedule (seconds) - most part exports finish before the first poll
 POLL_DELAYS_NEW = (5, 4, 6, 8, 10, 12, 13)
 POLL_DELAYS_RESUME = (2, 4, 6, 8, 10, 12)
-REVISION_TTL_LATEST = 3600  # "latest revision" may change when re-released
-REVISION_TTL_FIXED = 30 * 86400
-NOT_FOUND_TTL = 3600
 PENDING_TTL = 1800
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 MAX_INDEX_DOCS_PER_LOOKUP = 3  # documents (re)indexed at most per lookup (1 call each)
@@ -231,12 +228,13 @@ class ExtraTools:
         self,
         client,
         check_read: Callable[[str | None], Awaitable[None]],
+        *,
+        mapping: MappingStore,  # sole owner of part data (AD-6); the server does not start without it
         get_bytes: Callable[[str, int], Awaitable[bytes]] | None = None,
-        kv: KVCache | None = None,
+        kv: KVCache | None = None,  # immutable-ID metadata and pending jobs only (AD-12)
         files: FileCache | None = None,
         links: DownloadLinks | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        mapping: MappingStore | None = None,
         web_base_url: str = "https://cad.onshape.com",
     ):
         self.client = client
@@ -270,20 +268,20 @@ class ExtraTools:
     # ------------------------------------------------------------------ lookups
 
     async def _company(self) -> str:
-        if self._company_id is None and self.mapping is not None:
+        if self._company_id is None:
             self._company_id = self.mapping.meta("company_id")
-        if self._company_id is None and self.kv is not None:
-            self._company_id = self.kv.get("company_id")
+        if self._company_id is None and self.kv is not None:  # legacy location: move it into the mapping DB
+            legacy = self.kv.get("company_id")
+            if legacy:
+                self._company_id = str(legacy)
+                self.mapping.set_meta("company_id", self._company_id)
         if self._company_id is None:
             data = await self.client.get("/api/companies")
             items = data.get("items", []) if isinstance(data, dict) else []
             if not items:
                 raise PolicyDenied("Part-number lookup needs an Onshape company account (release management).")
             self._company_id = str(items[0]["id"])
-            if self.mapping is not None:
-                self.mapping.set_meta("company_id", self._company_id)
-            elif self.kv is not None:
-                self.kv.set("company_id", self._company_id)
+            self.mapping.set_meta("company_id", self._company_id)
         return self._company_id
 
     async def _revision(self, part_number: str, revision: str | None, element_type: int | None = None) -> dict:
@@ -292,19 +290,10 @@ class ExtraTools:
             raise PolicyDenied("'partNumber' has an unexpected format.")
         if revision and not REVISION_RE.match(revision):
             raise PolicyDenied("'revision' has an unexpected format.")
-        if self.mapping is not None:  # persistent mapping table
-            cached = self.mapping.get_revision(part_number, revision, element_type)
-            if cached is None:
-                cached = await self._fetch_revision(part_number, revision, element_type)
-                self.mapping.put_revision(part_number, revision, element_type, cached)
-        else:
-            key = f"rev2:{part_number}|{revision or ''}|{'' if element_type is None else element_type}"
-            cached = self.kv.get(key) if self.kv is not None else None
-            if cached is None:
-                cached = await self._fetch_revision(part_number, revision, element_type)
-                if self.kv is not None:
-                    ttl = NOT_FOUND_TTL if cached.get("notFound") else (REVISION_TTL_FIXED if revision else REVISION_TTL_LATEST)
-                    self.kv.set(key, cached, ttl)
+        cached = self.mapping.get_revision(part_number, revision, element_type)
+        if cached is None:
+            cached = await self._fetch_revision(part_number, revision, element_type)
+            self.mapping.put_revision(part_number, revision, element_type, cached)
         if cached.get("notFound"):
             kind = f" {ELEMENT_NAMES.get(element_type, '').lower()}" if element_type is not None else ""
             raise NotFound(
@@ -378,16 +367,13 @@ class ExtraTools:
             pn = str(p.get("partNumber") or "").strip()
             eid, pid = str(p.get("elementId") or ""), str(p.get("partId") or "")
             if len(pn) <= 64 and HEX24.match(eid) and PATH_SAFE_ID_RE.match(pid):  # also unnumbered (name search)
-                rows.append({"partNumber": pn, "elementId": eid, "partId": pid,
-                             "name": str(p.get("name") or "")[:120], "state": p.get("state"),
-                             "revision": p.get("revision")})
+                rows.append({"partNumber": pn, "elementId": eid, "partId": pid,  # no release status (AD-6)
+                             "name": str(p.get("name") or "")[:120]})
         self.mapping.replace_ws_parts(did, wid, rows)
         logger.info(f"indexed document parts={len(rows)}")
 
     async def _find_unreleased(self, part_number: str, document_id: str | None = None) -> list[dict]:
         """Part numbers that were never released: look them up in the workspace index."""
-        if self.mapping is None:
-            return []
         if document_id:
             await self.check_read(document_id)
             if not self.mapping.doc_index_fresh(document_id):
@@ -425,8 +411,7 @@ class ExtraTools:
 
         Works for every part that is used in at least one assembly; misses are remembered for 1 h.
         """
-        miss_key = f"wu_pn_miss:{part_number}"
-        if self.kv is not None and self.kv.get(miss_key):
+        if self.mapping.whereused_miss(part_number):
             return None
         status = 200
         try:
@@ -445,17 +430,15 @@ class ExtraTools:
             did = str(it.get("peerDocumentId") or "")
             if str(it.get("peerPartNumber") or "") == part_number and HEX24.match(did):
                 return did
-        if self.kv is not None:
-            self.kv.set(miss_key, True, NOT_FOUND_TTL)
+        self.mapping.put_whereused_miss(part_number)
         return None
 
     async def _not_found(self, part_number: str) -> PolicyDenied:
         docs = []
-        if self.mapping is not None:
-            for did in self.mapping.known_documents()[:10]:
-                st = self.mapping.doc_state(did)
-                if st and st.get("name") and await self._readable(did):
-                    docs.append(st["name"])
+        for did in self.mapping.known_documents()[:10]:
+            st = self.mapping.doc_state(did)
+            if st and st.get("name") and await self._readable(did):
+                docs.append(st["name"])
         where = f" Searched: {', '.join(docs)}." if docs else ""
         return NotFound(
             f"{part_number} is neither released nor in the indexed documents.{where} STOP - do not browse or "
@@ -478,7 +461,7 @@ class ExtraTools:
                 "released": False,
                 "note": "NOT released - this is the current working state (workspace), not a released version.",
                 "matches": [
-                    {"name": h["name"], "documentName": h.get("documentName"), "state": h.get("state"),
+                    {"name": h["name"], "documentName": h.get("documentName"),
                      "onshapeUrl": self._ws_url(h), "documentId": h["documentId"], "wvm": "w",
                      "wvmId": h["workspaceId"], "elementId": h["elementId"], "partId": h["partId"]}
                     for h in hits[:5]
@@ -524,22 +507,20 @@ class ExtraTools:
         return [TextContent(type="text", text=json.dumps(out, ensure_ascii=False, separators=(",", ":")))]
 
     async def search_part_index(self, args: dict) -> list:
-        if self.mapping is None:
-            raise PolicyDenied("Part index is not available.")
         text = (args.get("text") or "").strip()
         if not (2 <= len(text) <= 64) or any(c in text for c in "%_\\"):
             raise PolicyDenied("'text' must be 2-64 characters (no % or _).")
         hits = self.mapping.search_ws_parts(text, 20)
         out = [
             {"partNumber": h["partNumber"], "name": h["name"], "documentName": h.get("documentName"),
-             "state": h.get("state"), "onshapeUrl": self._ws_url(h)}
+             "onshapeUrl": self._ws_url(h)}
             for h in hits
         ]
         return [TextContent(type="text", text=json.dumps(out, ensure_ascii=False, separators=(",", ":")))]
 
     async def export_mapping_table(self, args: dict) -> list:
         """Whole mapping table as CSV download (Excel-friendly) - no Onshape call."""
-        if self.mapping is None or self.links is None or self.files is None:
+        if self.links is None or self.files is None:
             raise PolicyDenied("Export is not available.")
         import csv
         import io
@@ -567,8 +548,6 @@ class ExtraTools:
         ))]
 
     async def show_mapping_table(self, args: dict) -> list:
-        if self.mapping is None:
-            raise PolicyDenied("Mapping table is not available.")
         pattern = (args.get("partNumber") or "").strip() or None
         if pattern and not re.fullmatch(r"[A-Za-z0-9 _.#+\-*]{1,64}", pattern):
             raise PolicyDenied("'partNumber' pattern has an unexpected format.")
@@ -758,11 +737,7 @@ class ExtraTools:
     async def _drawings_where_used(self, part: dict) -> list[dict]:
         did, vid, eid = part["documentId"], part["versionId"], part["elementId"]
         pid = part.get("partId") or ""
-        key = f"whereused5:{did}:{vid}:{eid}:{pid}:{part.get('configuration') or ''}"
-        if self.mapping is not None:
-            cached = self.mapping.get_drawings(str(part.get("partNumber")), str(part.get("revision")))
-        else:
-            cached = self.kv.get(key) if self.kv is not None else None
+        cached = self.mapping.get_drawings(str(part.get("partNumber")), str(part.get("revision")))
         if cached is not None:
             return cached
         base_params: dict[str, Any] = {
@@ -794,23 +769,19 @@ class ExtraTools:
             else:
                 result.append(await self._released_drawing(cand))
         logger.info(f"whereused drawings={len(candidates)} resolved_directly={direct}")
-        if self.mapping is not None:
-            self.mapping.put_drawings(str(part.get("partNumber")), str(part.get("revision")), result)
-        elif self.kv is not None:
-            self.kv.set(key, result, REVISION_TTL_LATEST)  # new drawing revisions may appear
+        self.mapping.put_drawings(str(part.get("partNumber")), str(part.get("revision")), result)
         return result
 
     async def _released_drawing(self, cand: dict) -> dict:
         """Latest released revision of a drawing tab (its own number, e.g. DRW-000635) - 1 call."""
-        if self.mapping is not None:  # already known from the revision sync: no call
-            known = self.mapping.latest_drawing_for_element(cand["documentId"], cand["elementId"])
-            if known and HEX24.match(str(known.get("versionId") or "")):
-                return {
-                    **cand, "versionId": known["versionId"],
-                    "partNumber": str(known.get("partNumber") or "")[:64] or None,
-                    "revision": str(known.get("revision") or "")[:16] or None,
-                    "name": str(known.get("name") or cand.get("name") or "")[:120],
-                }
+        known = self.mapping.latest_drawing_for_element(cand["documentId"], cand["elementId"])
+        if known and HEX24.match(str(known.get("versionId") or "")):  # already known from the revision sync
+            return {
+                **cand, "versionId": known["versionId"],
+                "partNumber": str(known.get("partNumber") or "")[:64] or None,
+                "revision": str(known.get("revision") or "")[:16] or None,
+                "name": str(known.get("name") or cand.get("name") or "")[:120],
+            }
         cid = await self._company()
         try:
             hist = await self.client.get(
@@ -964,8 +935,6 @@ class ExtraTools:
 
     async def sync_revisions(self, max_pages: int = 50) -> dict:
         """All latest released revisions of the company: 1 call per 100 revisions, incremental."""
-        if self.mapping is None:
-            raise PolicyDenied("Mapping table is not available.")
         cid = await self._company()
         after = self.mapping.meta("rev_sync_after") or "2000-01-01T00:00:00Z"
         path = f"/api/revisions/companies/{quote(cid, safe='')}"
@@ -994,8 +963,6 @@ class ExtraTools:
 
     async def link_drawings(self, document_id: str | None, max_parts: int) -> dict:
         """Where Used per released part (1 call each) -> part->drawing links; drawing data from the sync."""
-        if self.mapping is None:
-            raise PolicyDenied("Mapping table is not available.")
         todo = [
             p for p in self.mapping.released_parts(document_id)
             if self.mapping.get_drawings(str(p.get("partNumber")), str(p.get("revision"))) is None

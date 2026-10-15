@@ -32,7 +32,7 @@ User docs: `docs/DOKUMENTATION.md` (German). Setup/details: `README.md`.
 ## Commands
 ```bash
 python -m venv .venv && . .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install --require-hashes --no-deps -r requirements.txt pytest pytest-asyncio
+pip install --require-hashes --no-deps -r requirements.txt && pip install pytest pytest-asyncio
 python -m pytest -q tests                            # our tests (must stay green)
 PYTHONPATH=src python -m pytest -q upstream_tests    # upstream tests
 ```

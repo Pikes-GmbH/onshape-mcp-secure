@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 ONSHAPE_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 TOKEN_LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
 MIN_TOKEN_LENGTH = 32
+ADMIN_LABEL = "admin"  # only this client may call /admin/* (token from ADMIN_TOKEN)
 
 
 class ConfigError(ValueError):
@@ -74,9 +75,18 @@ def _tokens() -> dict[str, str]:
             raise ConfigError(
                 f"MCP_AUTH_TOKENS: token for {label!r} is shorter than {MIN_TOKEN_LENGTH} characters"
             )
+        if label == ADMIN_LABEL:
+            raise ConfigError(f"MCP_AUTH_TOKENS: label {ADMIN_LABEL!r} is reserved (use ADMIN_TOKEN)")
         if token in tokens:
             raise ConfigError("MCP_AUTH_TOKENS: duplicate token")
         tokens[token] = label
+    admin = os.getenv("ADMIN_TOKEN", "").strip()
+    if admin:
+        if len(admin) < MIN_TOKEN_LENGTH:
+            raise ConfigError(f"ADMIN_TOKEN is shorter than {MIN_TOKEN_LENGTH} characters")
+        if admin in tokens:
+            raise ConfigError("ADMIN_TOKEN must differ from all MCP_AUTH_TOKENS")
+        tokens[admin] = ADMIN_LABEL
     return tokens
 
 

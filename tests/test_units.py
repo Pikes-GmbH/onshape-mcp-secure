@@ -139,7 +139,7 @@ GOOD_ENV = {
 def _load(monkeypatch, **env):
     for key in list(cfg.os.environ):
         if key in {"MCP_AUTH_TOKENS", "WRITE_MODE", "ONSHAPE_BASE_URL", "WRITE_ALLOWED_DOCUMENT_IDS",
-                   "DISABLED_TOOLS", "WRITE_ALLOWED_NAME_PREFIX"}:
+                   "DISABLED_TOOLS", "WRITE_ALLOWED_NAME_PREFIX", "ADMIN_TOKEN"}:
             monkeypatch.delenv(key, raising=False)
     for key, value in {**GOOD_ENV, **env}.items():
         monkeypatch.setenv(key, value)
@@ -156,6 +156,9 @@ def test_config_defaults(monkeypatch):
 @pytest.mark.parametrize("env", [
     {"MCP_AUTH_TOKENS": ""},
     {"MCP_AUTH_TOKENS": "short"},
+    {"MCP_AUTH_TOKENS": "admin:" + "y" * 40},
+    {"ADMIN_TOKEN": "short"},
+    {"ADMIN_TOKEN": "x" * 40},
     {"MCP_AUTH_TOKENS": "bad label!:" + "x" * 40},
     {"WRITE_MODE": "yolo"},
     {"ONSHAPE_BASE_URL": "http://cad.onshape.com"},
@@ -265,3 +268,15 @@ async def test_weekly_limit(tmp_path):
     with pytest.raises(QuotaExceeded):
         await budget.reserve()
     assert budget.snapshot()["this_week_utc"] == 2
+
+
+def test_admin_token_gets_reserved_label(monkeypatch):
+    assert _load(monkeypatch, ADMIN_TOKEN="y" * 40).auth_tokens == {"x" * 40: "clickup", "y" * 40: "admin"}
+
+
+def test_csv_export_neutralises_formulas():
+    from onshape_secure.extra_tools import _csv_safe
+
+    assert _csv_safe('=HYPERLINK("http://evil")') == "'=HYPERLINK(\"http://evil\")"
+    assert [_csv_safe(v) for v in ("+1", "-1", "@SUM(A1)", "\tx")] == ["'+1", "'-1", "'@SUM(A1)", "'\tx"]
+    assert _csv_safe("PRT-000593") == "PRT-000593" and _csv_safe(None) == ""

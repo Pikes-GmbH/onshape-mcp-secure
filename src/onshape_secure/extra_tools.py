@@ -220,6 +220,12 @@ class NotFound(PolicyDenied):
     pass
 
 
+def _csv_safe(value: Any) -> str:
+    """Neutralise spreadsheet formulas (CSV injection): Onshape names/numbers are user-controlled."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
 class ExtraTools:
     def __init__(
         self,
@@ -530,7 +536,7 @@ class ExtraTools:
             link = (self._url(r["documentId"], r["wvmId"], r["elementId"]) if r["wvm"] == "v"
                     else self._ws_url({"documentId": r["documentId"], "workspaceId": r["wvmId"],
                                        "elementId": r["elementId"]})) or ""
-            writer.writerow([r[c] for c in cols[:-1]] + [link])
+            writer.writerow([_csv_safe(r[c]) for c in cols[:-1]] + [link])
         data = ("\ufeff" + buf.getvalue()).encode("utf-8")  # BOM: Excel opens umlauts correctly
         stamp = _time.strftime("%Y-%m-%d")
         path = self.files.put(f"mapping-export:{_time.time()}", data)

@@ -120,15 +120,15 @@ Der Server führt eine eigene Tabelle aller Freigaben, Zeichnungen und indexiert
 
 **Große Dateien:** STEP, PDF und Bilder bleiben 24 Stunden ab Erstellung auf dem Volume, dann werden sie gelöscht. Die täglichen Fly-Snapshots halten sie bis zu 5 Tage.
 
-**Tabelle exportieren:** `export_mapping_table` liefert die ganze Tabelle als CSV für Excel, ohne Onshape-Aufruf.
+**Tabelle exportieren:** `export_mapping_table` liefert die ganze Tabelle als CSV für Excel, ohne Onshape-Aufruf. Zellen, die mit `=`, `+`, `-` oder `@` beginnen, werden mit `'` entschärft, damit Excel keine Formeln aus Onshape-Namen ausführt.
 
 ## Betrieb und Administration
 
 Der Server läuft als eine Fly.io-Maschine in Frankfurt (App `pikes-onshape-mcp`, Account von Eric). Im Leerlauf stoppt sie und startet beim nächsten Aufruf in wenigen Sekunden.
 
-**Geheimnisse (Fly-Dashboard → App → Secrets):** `ONSHAPE_ACCESS_KEY`, `ONSHAPE_SECRET_KEY`, `MCP_AUTH_TOKENS`. Sie stehen nie im Code oder in `fly.toml`.
+**Geheimnisse (Fly-Dashboard → App → Secrets):** `ONSHAPE_ACCESS_KEY`, `ONSHAPE_SECRET_KEY`, `MCP_AUTH_TOKENS`, `ADMIN_TOKEN`. Sie stehen nie im Code oder in `fly.toml`.
 
-**Admin-Endpunkte (nur mit Token):**
+**Admin-Endpunkte (nur mit dem separaten Admin-Token `ADMIN_TOKEN`; das ClickUp-Token wird abgelehnt, `/admin/sync` höchstens alle 10 Minuten):**
 
 | Aufruf | Zweck | Onshape-Aufrufe |
 | --- | --- | --- |
@@ -156,6 +156,7 @@ Alle Einstellungen kommen aus Umgebungsvariablen. Geheimnisse liegen als Fly-Sec
 | --- | --- | --- |
 | `ONSHAPE_ACCESS_KEY`, `ONSHAPE_SECRET_KEY` | Fly-Secret | API-Key des gemeinsamen Onshape-Accounts |
 | `MCP_AUTH_TOKENS` | Fly-Secret | Bearer-Tokens der Clients, Format `label:token`, mind. 32 Zeichen, kommagetrennt |
+| `ADMIN_TOKEN` | Fly-Secret | eigenes Token nur für die Admin-Endpunkte |
 | `WRITE_MODE` | **off** | `off` = nur lesen · `allowlist` = nur Dokumente mit Präfix oder aus der Liste · `all` = überall |
 | `WRITE_ALLOWED_NAME_PREFIX` | `AI-` | Namenspräfix beschreibbarer Dokumente |
 | `WRITE_ALLOWED_DOCUMENT_IDS` | leer | zusätzlich beschreibbare Dokumente |

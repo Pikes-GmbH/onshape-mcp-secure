@@ -67,7 +67,7 @@ Test:
 ```bash
 curl https://pikes-onshape-mcp.fly.dev/healthz        # {"status":"ok"}
 curl -X POST https://pikes-onshape-mcp.fly.dev/mcp \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_server_policy","arguments":{}}}'
 ```
@@ -125,16 +125,16 @@ So wird gespart:
 
 ```bash
 # alle aktuellen Freigaben der Firma (1 Aufruf je 100 Revisionen, danach inkrementell)
-curl -X POST "https://pikes-onshape-mcp.fly.dev/admin/sync" -H "Authorization: Bearer $TOKEN"
+curl -X POST "https://pikes-onshape-mcp.fly.dev/admin/sync" -H "Authorization: Bearer $ADMIN_TOKEN"
 # zusätzlich Teil -> Zeichnung für ein Dokument (Where Used, ~1 Aufruf pro freigegebenem Teil)
-curl -X POST "https://pikes-onshape-mcp.fly.dev/admin/sync?document=Robot%20Gen3&maxParts=50" -H "Authorization: Bearer $TOKEN"
+curl -X POST "https://pikes-onshape-mcp.fly.dev/admin/sync?document=Robot%20Gen3&maxParts=50" -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
 **Webhook einrichten (einmalig):**
 
 ```bash
-curl -X POST https://pikes-onshape-mcp.fly.dev/admin/webhook -H "Authorization: Bearer $TOKEN"
-curl https://pikes-onshape-mcp.fly.dev/admin/webhook -H "Authorization: Bearer $TOKEN"   # Status
+curl -X POST https://pikes-onshape-mcp.fly.dev/admin/webhook -H "Authorization: Bearer $ADMIN_TOKEN"
+curl https://pikes-onshape-mcp.fly.dev/admin/webhook -H "Authorization: Bearer $ADMIN_TOKEN"   # Status
 ```
 
 Hinweis: Fly-Snapshots des Volumes (täglich, 5 Tage) enthalten auch Dateien, die zum Zeitpunkt des Snapshots < 24 h alt waren. Wer das nicht will: `fly volumes update <id> --scheduled-snapshots=false`.
@@ -150,7 +150,8 @@ Nicht freigegebene Teile sind über die Onshape-API nicht per Teilenummer auffin
 | Variable | Standard | Bedeutung |
 |---|---|---|
 | `ONSHAPE_ACCESS_KEY` / `ONSHAPE_SECRET_KEY` | – | **Secret.** API-Key des Service-Accounts |
-| `MCP_AUTH_TOKENS` | – | **Secret.** `label:token,label2:token2` – Label erscheint im Audit-Log |
+| `MCP_AUTH_TOKENS` | – | **Secret.** `label:token,label2:token2` – Label erscheint im Audit-Log (Label `admin` ist reserviert) |
+| `ADMIN_TOKEN` | – | **Secret.** Eigenes Token nur für `/admin/*` (min. 32 Zeichen). Client-Tokens wie das von ClickUp erhalten dort 403; `/admin/sync` höchstens alle 10 Minuten |
 | `WRITE_MODE` | `allowlist` | `off` = nur lesen, `allowlist` = Präfix/IDs, `all` = überall (nicht empfohlen) |
 | `WRITE_ALLOWED_NAME_PREFIX` | `AI-` | Dokumente mit diesem Namensanfang sind beschreibbar; leer = aus |
 | `WRITE_ALLOWED_DOCUMENT_IDS` | leer | Zusätzlich beschreibbare Dokument-IDs (kommagetrennt) |

@@ -14,6 +14,7 @@ from onshape_secure.config import Settings  # noqa: E402
 
 TOKEN = "t" * 40
 OTHER_TOKEN = "o" * 40
+ADMIN_TOKEN = "z" * 40
 AI_DOC = "a" * 24  # name starts with prefix -> writable
 PROD_DOC = "b" * 24  # production document -> read only
 LISTED_DOC = "c" * 24  # allow-listed by id
@@ -26,7 +27,7 @@ def make_settings(tmp_path, **overrides) -> Settings:
         onshape_access_key="test-access",
         onshape_secret_key="test-secret",
         onshape_base_url="https://cad.onshape.com",
-        auth_tokens={TOKEN: "clickup", OTHER_TOKEN: "eric"},
+        auth_tokens={TOKEN: "clickup", OTHER_TOKEN: "eric", ADMIN_TOKEN: "admin"},
         write_mode="allowlist",
         write_allowed_document_ids=frozenset({LISTED_DOC}),
         write_allowed_name_prefix="AI-",

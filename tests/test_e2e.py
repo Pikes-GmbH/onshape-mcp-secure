@@ -15,7 +15,7 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 
-from conftest import AI_DOC, EL, LISTED_DOC, OTHER_TOKEN, PROD_DOC, TOKEN, WS, make_settings
+from conftest import ADMIN_TOKEN, AI_DOC, EL, LISTED_DOC, OTHER_TOKEN, PROD_DOC, TOKEN, WS, make_settings
 
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 64).decode()
 NEW_DOC = "f" * 24
@@ -718,16 +718,33 @@ async def test_mapping_table_and_drawing_lookup(server):
 
 
 def test_webhook_admin_requires_token(server):
-    base, _ = server()
+    base, fake = server()
     assert httpx.post(base + "/admin/webhook").status_code == 401
     assert httpx.get(base + "/admin/webhook").status_code == 401
+    # a normal client token (e.g. ClickUp) must not reach the admin endpoints
+    h = {"Authorization": f"Bearer {TOKEN}"}
+    assert httpx.post(base + "/admin/webhook", headers=h).status_code == 403
+    assert httpx.get(base + "/admin/webhook", headers=h).status_code == 403
+    assert httpx.post(base + "/admin/sync?maxParts=200", headers=h).status_code == 403
+    assert fake.requests == []
+
+
+def test_admin_sync_cooldown_and_validation(server):
+    base, fake = server()
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    assert httpx.post(base + "/admin/sync?maxParts=abc", headers=h).status_code == 400
+    assert httpx.post(base + "/admin/sync", headers=h, timeout=30).status_code == 200
+    n = len(fake.requests)
+    second = httpx.post(base + "/admin/sync", headers=h)
+    assert second.status_code == 429 and "cooldown" in second.json()["error"]
+    assert len(fake.requests) == n
 
 
 async def test_webhook_registration_and_invalidation(server, tmp_path):
     from onshape_secure.mapping import MappingStore
 
     base, fake = server()
-    h = {"Authorization": f"Bearer {TOKEN}"}
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     status = httpx.post(base + "/admin/webhook", headers=h).json()
     assert status["registered"] and status["active"]
     reg = [b for m, p, b in fake.requests if p == "/api/webhooks"]
@@ -832,7 +849,7 @@ async def test_metadata_webhook_marks_index_stale(server, tmp_path):
     from onshape_secure.mapping import MappingStore
 
     base, fake = server()
-    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {TOKEN}"})
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
     await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
     await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
     assert fake.index_calls == 1
@@ -859,7 +876,7 @@ async def test_metadata_webhook_is_separate_and_optional(server, tmp_path):
     from onshape_secure.mapping import MappingStore
 
     base, fake = server()
-    h = {"Authorization": f"Bearer {TOKEN}"}
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     httpx.post(base + "/admin/webhook", headers=h)  # creates release webhook
     status = httpx.post(base + "/admin/webhook", headers=h).json()  # then the metadata one
     created = [b for m, p, b in fake.requests if p == "/api/webhooks"]
@@ -894,9 +911,12 @@ async def test_every_result_reports_onshape_cost(server):
 # --- batch sync ----------------------------------------------------------------------------
 
 
-def test_batch_sync_builds_table_cheaply(server):
+def test_batch_sync_builds_table_cheaply(server, monkeypatch):
+    import onshape_secure.app as app_mod
+
+    monkeypatch.setattr(app_mod, "ADMIN_SYNC_COOLDOWN", 0)
     base, fake = server()
-    h = {"Authorization": f"Bearer {TOKEN}"}
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     assert httpx.post(base + "/admin/sync").status_code == 401
     res = httpx.post(base + "/admin/sync?document=Robot%20Gen3&maxParts=10", headers=h, timeout=30).json()
     assert res["revisions"] == {"pages": 2, "revisionsStored": 2, "complete": True}
@@ -914,7 +934,7 @@ def test_batch_sync_builds_table_cheaply(server):
 async def test_synced_table_answers_without_calls(server):
     base, fake = server()
     httpx.post(base + "/admin/sync?document=Robot%20Gen3&maxParts=10",
-               headers={"Authorization": f"Bearer {TOKEN}"}, timeout=30)
+               headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}, timeout=30)
     n = len(fake.requests)
     found = _json(await _call(base, "find_drawing_for_part", {"partNumber": "PRT-000900"}))
     assert found["drawings"][0]["drawingNumber"] == "DRW-000635" and found["drawings"][0]["revision"] == "B"
@@ -926,7 +946,7 @@ async def test_synced_table_answers_without_calls(server):
 async def test_export_mapping_table_csv(server):
     base, fake = server()
     httpx.post(base + "/admin/sync?document=Robot%20Gen3&maxParts=10",
-               headers={"Authorization": f"Bearer {TOKEN}"}, timeout=30)
+               headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}, timeout=30)
     await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})  # unreleased, indexed
     n = len(fake.requests)
     result = await _call(base, "export_mapping_table", {})

@@ -27,7 +27,7 @@ from starlette.routing import Mount, Route
 
 from . import __version__
 from .auth import BearerAuthMiddleware, current_client
-from .config import Settings, load_settings
+from .config import ADMIN_LABEL, Settings, load_settings
 from .policy import (
     CREATE_DOC,
     DELETE,
@@ -53,6 +53,8 @@ from .mapping import MappingStore
 from .webhooks import METADATA_EVENT, RELEASE_EVENTS
 from .webhooks import make_receiver
 from .quota import OnshapeBudget, QuotaExceeded, RateLimiter
+
+ADMIN_SYNC_COOLDOWN = 600  # seconds between two /admin/sync runs
 
 TOOL_TIMEOUT_SECONDS = 180
 POLICY_TOOL = "get_server_policy"
@@ -489,8 +491,18 @@ def create_app(settings: Settings | None = None) -> Starlette:
     if mapping is not None and settings.public_base_url:
         routes.append(Route("/onshape/webhook/{secret}", endpoint=make_receiver(mapping), methods=["POST"]))
 
+        def _not_admin() -> Response | None:
+            client = current_client.get()
+            if client != ADMIN_LABEL:
+                logger.warning(f"admin_denied client={json.dumps(client)}")
+                return JSONResponse({"error": "admin token required"}, status_code=403)
+            return None
+
         async def admin_webhook(request: Request) -> Response:
-            """Bearer-protected: GET = status, POST = register the release webhook (once)."""
+            """Admin token only: GET = status, POST = register the release webhook (once)."""
+            if (denied := _not_admin()) is not None:
+                return denied
+            logger.info(f"AUDIT admin_webhook method={request.method}")
             ctx = {"cls": SYSTEM, "doc": None, "requests": 0, "blocked": 0}
             token = _call_ctx.set(ctx)
             try:
@@ -547,14 +559,28 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
         routes.append(Route("/admin/webhook", endpoint=admin_webhook, methods=["GET", "POST"]))
 
+        sync_state = {"last": 0.0}
+
         async def admin_sync(request: Request) -> Response:
-            """Bearer-protected batch: sync released revisions (+ optional part->drawing links)."""
+            """Admin token only, max. once per 10 min: sync released revisions (+ part->drawing links)."""
+            if (denied := _not_admin()) is not None:
+                return denied
+            if not re.fullmatch(r"\d{0,4}", request.query_params.get("maxParts", "")):
+                return JSONResponse({"error": "maxParts must be an integer"}, status_code=400)
+            wait = sync_state["last"] + ADMIN_SYNC_COOLDOWN - time.time()
+            if wait > 0:
+                return JSONResponse({"error": f"sync cooldown, retry in {int(wait) + 1} s"}, status_code=429)
+            sync_state["last"] = time.time()
+            logger.info(f"AUDIT admin_sync query={json.dumps(str(request.query_params))[:200]}")
             ctx = {"cls": READ, "doc": None, "requests": 0, "blocked": 0, "billed": 0}
             token = _call_ctx.set(ctx)
             try:
                 q = request.query_params
                 doc = q.get("document")  # documentId or exact document name for drawing links
-                max_parts = max(0, min(int(q.get("maxParts", "0") or 0), 200))
+                try:
+                    max_parts = max(0, min(int(q.get("maxParts", "0") or 0), 200))
+                except ValueError:
+                    return JSONResponse({"error": "maxParts must be an integer"}, status_code=400)
                 result: dict = {"revisions": await extra.sync_revisions()}
                 if max_parts:
                     did = None

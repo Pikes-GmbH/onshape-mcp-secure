@@ -25,3 +25,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-h-2-h-3-mapping-ownership.md`
   summary: Nach Release-Webhook (löscht alle `latest`-Zeilen der Nummer) oder abgelaufener TTL kann eine gleichnamige Zeichnung den untypisierten Zeiger übernehmen; `find_part_by_number` ohne Typ liefert dann die Zeichnung, bis eine typisierte Teile-Suche läuft.
   evidence: Vorbestehend (alter Sync und Lookup gleich); Teil-Vorrang über Invalidierung hinweg bräuchte einen Onshape-Call oder Rückgriff auf eine ungeprüfte Revision aus `revisions`. Code-Review H-2/H-3 (Blind Hunter, Edge Case Hunter).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-h-11-h-12-h-13-webhook-version-budget-warning-backups.md`
+  summary: Budget-Warnung (≥ 80 % Monat/Jahr) erscheint nur im Tool-Ergebnis, nicht in der `AUDIT`-Zeile oder `GET /admin/webhook`; Eric kann sie nicht per `fly logs | grep` finden.
+  evidence: Code-Review H-11..H-13 (Blind Hunter). Ein Feld `budgetWarning` im AUDIT-JSON wäre klein, ist aber Log-Format-Änderung außerhalb der Spec.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-h-11-h-12-h-13-webhook-version-budget-warning-backups.md`
+  summary: Wiederherstellung aus Fly-Snapshots ist nicht dokumentiert (Ablauf `fly volumes snapshots list` / `fly volumes create --snapshot-id`, WAL-Dateien von `mappings.db` mitnehmen, Budgetzähler springt bis zu 1 Tag zurück).
+  evidence: Code-Review H-11..H-13 (Blind Hunter); Snapshots sind jetzt das erklärte Backup, Restore-Runbook fehlt.

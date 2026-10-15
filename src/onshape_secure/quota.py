@@ -22,6 +22,20 @@ def _now_keys() -> tuple[str, str, str, str]:
 
 
 ATTEMPTS_PER_DAY = 500  # hard cap incl. failed calls (Onshape doesn't bill them, but may throttle)
+WARN_PERCENT = 80  # month/year usage from which every tool result carries a budget warning
+
+
+def budget_warning(snapshot: dict) -> str | None:
+    """German warning once month or year usage reaches WARN_PERCENT of its limit (None below)."""
+    hits = []
+    for label, used_key, limit_key in (("Monat", "this_month_utc", "monthly_limit"),
+                                       ("Jahr", "this_year_utc", "yearly_limit")):
+        used, limit = snapshot[used_key], snapshot[limit_key]
+        if isinstance(limit, int) and limit > 0 and used * 100 >= WARN_PERCENT * limit:
+            hits.append(f"{label} {used}/{limit} ({used * 100 // limit} %)")
+    if not hits:
+        return None
+    return f"WARNUNG Onshape-Budget fast verbraucht: {', '.join(hits)}"
 
 
 class OnshapeBudget:

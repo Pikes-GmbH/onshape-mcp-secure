@@ -86,6 +86,7 @@ Pikes hat 2.500 Onshape-API-Aufrufe pro Jahr; der Server stoppt sich selbst, bev
 
 - **Gezählt wird wie bei Onshape:** nur erfolgreiche Aufrufe. Fehlgeschlagene werden zurückgebucht; davon sind höchstens 1.000 pro Tag erlaubt.
 - **Kostenzeile:** Jedes Ergebnis endet mit `[Onshape-API: n Aufruf(e) für diese Anfrage · heute … · Woche … · Monat … · Jahr …]`. Die KI nennt die Summe am Ende ihrer Antwort.
+- **Budget-Warnung:** Ab 80 % des Monats- oder Jahreslimits trägt die Kostenzeile am Ende zusätzlich `· WARNUNG Onshape-Budget fast verbraucht: Monat …/… (… %)`; `get_server_policy` zeigt sie unter `budget_warning`. Die KI gibt sie an den Nutzer weiter. Einen eigenen Benachrichtigungskanal (Mail, ClickUp) gibt es nicht.
 - **Kein Herumsuchen:** Die KI muss Teilenummern über `find_part_by_number` suchen. Findet sie nichts, fragt sie nach dem Dokument, statt Onshape zu durchstöbern. Früher kostete eine solche Suche 22 bis 30 Aufrufe.
 - **Rate-Limit:** 30 Tool-Aufrufe pro Minute und Token, höchstens 4 parallel.
 
@@ -121,7 +122,7 @@ Der Server führt eine eigene Tabelle aller Freigaben, Zeichnungen und indexiert
 - In Zuordnungstabelle und Teile-Index kommen Freigabestatus und Revision nur aus den Freigaben; nicht freigegebene Teile zeigen keinen Status und keine Revision aus dem Arbeitsstand. (`get_parts` liest den Arbeitsstand live und zeigt dessen Werte.)
 - Einmal pro Woche prüft der Server mit 1 Aufruf, ob der Webhook noch lebt. Fällt er aus, wird stündlich neu geprüft.
 
-**Große Dateien:** STEP, PDF und Bilder bleiben 24 Stunden ab Erstellung auf dem Volume, dann werden sie gelöscht. Die täglichen Fly-Snapshots halten sie bis zu 5 Tage.
+**Große Dateien:** STEP, PDF und Bilder bleiben 24 Stunden ab Erstellung auf dem Volume, dann werden sie gelöscht. Die täglichen Fly-Snapshots (bleiben an, siehe Grenzen) halten sie bis zu 5 Tage.
 
 **Tabelle exportieren:** `export_mapping_table` liefert die ganze Tabelle als CSV für Excel, ohne Onshape-Aufruf. Zellen, die mit `=`, `+`, `-` oder `@` beginnen, werden mit `'` entschärft, damit Excel keine Formeln aus Onshape-Namen ausführt.
 
@@ -211,7 +212,7 @@ Obergrenze knapp 4,50 $/Monat, selbst ohne Auto-Stop. Tatsächliche Kosten: Fly-
 - **Unfreigegebene Teile**, die in keiner Baugruppe verbaut sind, findet der Server nur mit Dokument-Hinweis.
 - **STEP- und Zeichnungsexport** nur für freigegebene Stände.
 - **Where Used per Teilenummer** setzt Onshape Professional oder Enterprise voraus.
-- **Snapshots:** Fly sichert das Volume täglich (5 Tage). Nach 24 h gelöschte Dateien können dort noch bis zu 5 Tage liegen.
+- **Snapshots:** Fly sichert das Volume täglich (5 Tage). Die Snapshots bleiben bewusst an: Sie sind das Backup von Zuordnungstabelle (`mappings.db`) und Budgetzähler (`usage.json`). Nach 24 h gelöschte Dateien können dort noch bis zu 5 Tage liegen.
 - **Prompt Injection:** Texte aus Onshape (Namen, Beschreibungen) gehen ans Sprachmodell. Deshalb bleibt der Schreibzugriff aus.
 
 ### Fehlerbehebung

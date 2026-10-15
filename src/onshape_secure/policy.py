@@ -126,6 +126,9 @@ class PolicyDenied(Exception):
 
 # POST endpoints that Onshape documents as read-only (evaluation / export jobs)
 READ_ONLY_POST_SUFFIXES = ("/featurescript", "/translations")
+# own webhook calls (registration, weekly check); ids are version-independent
+WEBHOOKS_PATH = "/api/v6/webhooks"
+_WEBHOOK_ID_PATH_RE = re.compile(re.escape(WEBHOOKS_PATH) + r"/[0-9a-f]{24}")
 _DOC_IN_PATH_RE = re.compile(r"/d/([0-9a-f]{24})(?:/|$)")
 
 
@@ -144,8 +147,8 @@ def check_onshape_request(method: str, path: str, cls: str | None, gated_documen
     if method == "post" and cls == CREATE_DOC and bare == "/api/v10/documents":
         return
     if cls == SYSTEM and (
-        (method == "post" and bare == "/api/webhooks")
-        or (method in ("post", "delete") and re.fullmatch(r"/api/webhooks/[0-9a-f]{24}", bare))
+        (method == "post" and bare == WEBHOOKS_PATH)
+        or (method in ("post", "delete") and _WEBHOOK_ID_PATH_RE.fullmatch(bare))
     ):
         return
     if cls in (WRITE, DELETE) and gated_document:

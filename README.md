@@ -118,7 +118,7 @@ So wird gespart:
 - **Nicht freigegebene Teile finden:** zuerst Where Used firmenweit per Teilenummer (`/api/v17/productstructure/whereused?partNumber=…&useLatestVersion=false`, 1 Aufruf) → liefert das Dokument des Teils, das dann einmalig indexiert wird. Klappt für alle Teile, die in mindestens einer Baugruppe verbaut sind; sonst Dokument angeben.
 - **Teilenummern-Index für nicht freigegebene Teile:** pro Dokument 1 Aufruf (`/parts/d/…/w/…` liefert alle Teile aller Part Studios inkl. Teilenummer), gespeichert in der Tabelle. Indexiert werden Dokumente, in denen schon freigegebene Teile liegen, plus vom Nutzer genannte. Der Webhook `onshape.model.lifecycle.metadata` markiert geänderte Dokumente als veraltet; ohne Webhook täglich neu.
 - **Budget wie Onshape abrechnet:** Fehlgeschlagene Aufrufe (4xx/5xx) werden zurückgebucht, Onshape berechnet sie nicht. Limits: 500/Tag, 600/Woche, 1000/Monat, 2400/Jahr (Plan: 2500/Jahr).
-- **Kosten sichtbar:** Jedes Tool-Ergebnis endet mit `[Onshape-API: n Aufruf(e) für diese Anfrage · heute … · Woche … · Monat … · Jahr …]`; die KI soll die Summe am Ende ihrer Antwort nennen.
+- **Kosten sichtbar:** Jedes Tool-Ergebnis endet mit `[Onshape-API: n Aufruf(e) für diese Anfrage · heute … · Woche … · Monat … · Jahr …]`; die KI soll die Summe am Ende ihrer Antwort nennen. Ab 80 % des Monats- oder Jahreslimits trägt die Zeile zusätzlich `· WARNUNG Onshape-Budget fast verbraucht: …` (auch in `get_server_policy`), die die KI an den Nutzer weitergibt.
 - Die Server-Anweisungen verbieten der KI „Erkunden“: Teilenummern immer über `find_part_by_number`; wird nichts gefunden, muss sie den Nutzer nach dem Dokument fragen.
 
 **Batch-Aufbau der Tabelle (Admin):**
@@ -137,7 +137,7 @@ curl -X POST https://pikes-onshape-mcp.fly.dev/admin/webhook -H "Authorization: 
 curl https://pikes-onshape-mcp.fly.dev/admin/webhook -H "Authorization: Bearer $ADMIN_TOKEN"   # Status
 ```
 
-Hinweis: Fly-Snapshots des Volumes (täglich, 5 Tage) enthalten auch Dateien, die zum Zeitpunkt des Snapshots < 24 h alt waren. Wer das nicht will: `fly volumes update <id> --scheduled-snapshots=false`.
+**Snapshots bleiben an:** Die Fly-Snapshots des Volumes (täglich, 5 Tage) sind das Backup von `mappings.db` (Zuordnungstabelle, Webhook-IDs und -Geheimnis) und `usage.json` (Budgetzähler). Sie enthalten auch Exporte/Bilder, die zum Zeitpunkt des Snapshots höchstens 24 h alt waren. Nicht abschalten.
 
 Zeichnung finden: per **Where Used** auf die Freigabeversion des Teils (1 Aufruf), dann die eigene Freigabe der Zeichnung (z. B. DRW-000635 Rev A, 1 Aufruf) – genau wie in der Onshape-Oberfläche. Fallbacks: Freigabepaket, Zeichnungs-Tabs im Dokument. Mehrere Zeichnungen → die KI bekommt eine Auswahl, alternativ direkt `drawingNumber`.
 

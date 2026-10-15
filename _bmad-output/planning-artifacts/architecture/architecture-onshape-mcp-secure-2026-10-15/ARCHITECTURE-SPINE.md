@@ -238,11 +238,13 @@ _bmad-output/         # BMAD-Artefakte
 docs/                 # Nutzer-Doku (Deutsch)
 ```
 
-## Hardening-Backlog (Code weicht heute ab)
+## Hardening-Backlog (abgeschlossen 2026-10-15)
+
+Alle Abweichungen H-1..H-13 sind behoben. Offene Folgepunkte stehen in `_bmad-output/implementation-artifacts/deferred-work.md`.
 
 | ID | Abweichung | Regel |
 | --- | --- | --- |
-| H-1 | Code-Defaults offen: `WRITE_MODE=allowlist`, `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT`, `ENABLE_LEGACY_SSE` = true; gesetztes `DISABLED_TOOLS` hebt Export-Sperre auf | AD-10, AD-5 |
+| H-1 | **Erledigt 2026-10-15** (war: Code-Defaults offen: `WRITE_MODE=allowlist`, `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT`, `ENABLE_LEGACY_SSE` = true; gesetztes `DISABLED_TOOLS` hebt Export-Sperre auf). Jetzt: Defaults `off`/`false`, `DISABLED_TOOLS` wird mit den Default-Sperren vereinigt | AD-10, AD-5 |
 | H-2 | **Erledigt 2026-10-15** (war: KV-Fallbacks für Teile-Daten in `_revision`, `_drawings_where_used`, `_locate_by_where_used`). Jetzt: `ExtraTools` verlangt die Mapping-DB; Where-Used-Fehltreffer in `whereused_misses` (1 h); Company-ID in `meta` (Alt-Wert aus KV wird übernommen) | AD-6, AD-12 |
 | H-3 | **Erledigt 2026-10-15** (war: `put_revision` und `put_synced_revision` lösten `latest[pn,'']` unterschiedlich auf). Jetzt: je eine Schreibfunktion für Revisionszeile, Latest-Zeiger, Not-found-Marker; Regel „Teil vor Zeichnung, außer der Teil-Zeiger ist älter als die Latest-TTL“ steht einmal in `_write_latest`; `ws_parts.state`/`revision` werden weder geschrieben noch gelesen | AD-6 |
 | H-4 | **Erledigt 2026-10-15** (war: `ping`/`register` setzten `webhook_verified_at`; Events ohne `webhookId` akzeptiert; Release-Events ohne `ws_docs`-dirty). Offen: Gate öffnet wieder, wenn der Webhook verschwindet (deferred-work.md); ob Release-Events `documentId` tragen, zeigt das Log-Feld `doc=yes/no` | AD-7 |
@@ -252,9 +254,9 @@ docs/                 # Nutzer-Doku (Deutsch)
 | H-8 | **Erledigt 2026-10-15** (war: `auth_failed` loggte den vollen Pfad mit Webhook-Geheimnis/Link-Token; jetzt Präfix + 6 Zeichen, Access-Log explizit aus) | AD-10, AD-13 |
 | H-9 | **Erledigt 2026-10-15** (war: `find_drawing_for_part` / `_find_unreleased` ohne `check_read`; Read-Scope über Namensliste statt Klasse `index`) | AD-14 |
 | H-10 | **Erledigt 2026-10-15** (war: kein Test für Übereinstimmung der Tool-Registrierungslisten; doppelte Namen überschrieben still) | AD-2, AD-11 |
-| H-11 | `/api/webhooks` ohne API-Version | Konvention Onshape-API-Pfade |
-| H-12 | Budget-Warnung ab 80 % fehlt in der Verbrauchszeile | Betrieb/Monitoring |
-| H-13 | README empfiehlt, Volume-Snapshots abzuschalten | Betrieb/Backups |
+| H-11 | **Erledigt 2026-10-15** (war: `/api/webhooks` ohne API-Version). Jetzt: `WEBHOOKS_PATH = /api/v6/webhooks` in `policy.py` für Registrierung, Wochenprüfung und Guard; unversionierte Pfade werden abgelehnt. Registrierte Webhook-IDs bleiben | Konvention Onshape-API-Pfade |
+| H-12 | **Erledigt 2026-10-15** (war: keine Budget-Warnung). Jetzt: ab 80 % Monats- oder Jahreslimit trägt die `[Onshape-API: …]`-Zeile `· WARNUNG Onshape-Budget fast verbraucht: …`; `get_server_policy` zeigt `budget_warning` | Betrieb/Monitoring |
+| H-13 | **Erledigt 2026-10-15** (war: README empfahl, Volume-Snapshots abzuschalten). Jetzt: README und DOKUMENTATION nennen Snapshots als Backup von `mappings.db` und `usage.json` | Betrieb/Backups |
 
 ## Deferred
 

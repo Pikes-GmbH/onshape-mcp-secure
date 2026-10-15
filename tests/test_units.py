@@ -22,7 +22,7 @@ from onshape_secure.policy import (
     is_tool_enabled,
     sanitize_arguments,
 )
-from onshape_secure.quota import OnshapeBudget, QuotaExceeded, RateLimiter
+from onshape_secure.quota import OnshapeBudget, QuotaExceeded, RateLimiter, budget_warning
 
 
 async def test_every_upstream_tool_is_classified():
@@ -278,7 +278,9 @@ P = f"/api/v9/partstudios/d/{AI_DOC}/w/{'d' * 24}/e/{'e' * 24}/features"
     ("delete", P + "/featureid/F1", DELETE, AI_DOC),
     ("post", f"/api/v8/partstudios/d/{PROD_DOC}/w/x/e/y/featurescript", READ, None),
     ("post", "/api/v10/documents", CREATE_DOC, None),
-    ("post", "/api/webhooks", "system", None),
+    ("post", "/api/v6/webhooks", "system", None),
+    ("post", "/api/v6/webhooks/" + "a" * 24, "system", None),
+    ("delete", "/api/v6/webhooks/" + "a" * 24, "system", None),
 ])
 def test_guard_allows(method, path, cls, doc):
     check_onshape_request(method, path, cls, doc)
@@ -293,12 +295,58 @@ def test_guard_allows(method, path, cls, doc):
     ("post", P, None, None),                 # outside any tool call
     ("delete", f"/api/v6/documents/{AI_DOC}", DELETE, AI_DOC),  # no /d/ segment -> blocked
     ("post", f"/api/v9/assemblies/d/{AI_DOC}/w/x/e/y/features?x=/d/{PROD_DOC}/", WRITE, PROD_DOC),
-    ("post", "/api/webhooks", READ, None),      # tools can never register webhooks
-    ("post", "/api/webhooks", WRITE, AI_DOC),
+    ("post", "/api/v6/webhooks", READ, None),   # tools can never register webhooks
+    ("post", "/api/v6/webhooks", WRITE, AI_DOC),
+    ("post", "/api/webhooks", "system", None),  # H-11: unversioned path no longer allowed
+    ("delete", "/api/webhooks/" + "a" * 24, "system", None),
+    ("post", "/api/v5/webhooks", "system", None),  # only the pinned version
+    ("post", "/api/v6/webhooks/" + "a" * 24 + "/ping", "system", None),
+    ("post", "/api/v6/webhooks/" + "A" * 24, "system", None),
+    ("delete", "/api/v6/webhooks", "system", None),
+    ("post", "/api/v6/webhooksx", "system", None),
+    ("post", "/api/v6/webhooks/", "system", None),
+    ("delete", "/api/v6/webhooks/" + "a" * 24, READ, None),
+    ("delete", "/api/v6/webhooks/" + "a" * 24, WRITE, AI_DOC),
 ])
 def test_guard_blocks(method, path, cls, doc):
     with pytest.raises(PolicyDenied):
         check_onshape_request(method, path, cls, doc)
+
+
+def _snap(month=0, month_limit=100, year=0, year_limit=100):
+    return {"this_month_utc": month, "monthly_limit": month_limit, "this_year_utc": year, "yearly_limit": year_limit}
+
+
+@pytest.mark.parametrize("snap,expected", [
+    (_snap(month=79), None),
+    (_snap(month=80), "Monat 80/100 (80 %)"),
+    (_snap(month=100), "Monat 100/100 (100 %)"),
+    (_snap(year=79), None),
+    (_snap(year=80), "Jahr 80/100 (80 %)"),
+    (_snap(year=100), "Jahr 100/100 (100 %)"),
+    (_snap(month=99999, month_limit="unlimited", year=99999, year_limit="unlimited"), None),
+])
+def test_budget_warning_threshold(snap, expected):
+    warning = budget_warning(snap)
+    if expected is None:
+        assert warning is None
+    else:
+        assert warning.startswith("WARNUNG") and expected in warning
+
+
+def test_budget_warning_skips_period_below_threshold():
+    warning = budget_warning(_snap(month=1920, month_limit=2400, year=1919, year_limit=2400))  # year 79.96 %
+    assert "Monat 1920/2400" in warning and "Jahr" not in warning
+
+
+def test_budget_warning_ignores_day_and_week():
+    snap = {**_snap(month=10, year=10), "today_utc": 500, "daily_limit": 500, "this_week_utc": 600, "weekly_limit": 600}
+    assert budget_warning(snap) is None
+
+
+def test_budget_warning_names_both_periods():
+    warning = budget_warning(_snap(month=90, year=85))
+    assert "Monat 90/100 (90 %)" in warning and "Jahr 85/100 (85 %)" in warning
 
 
 async def test_websocket_scope_rejected():

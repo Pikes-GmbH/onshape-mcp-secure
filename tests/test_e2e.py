@@ -75,7 +75,7 @@ class FakeOnshape:
         if path == f"/api/parts/d/{PROD_DOC}/w/{WS}/e/{EL}":
             return httpx.Response(200, json=[{"name": "Deckel", "partId": "JHD", "partNumber": "PRT-000593",
                                               "revision": "A", "state": "RELEASED"}])
-        if re.fullmatch(r"/api/webhooks/e{24}", path) and request.method == "POST":
+        if re.fullmatch(r"/api/v6/webhooks/e{24}", path) and request.method == "POST":
             return httpx.Response(200, json={"id": "e" * 24})
         if path == "/api/revisions/companies/c0mpany":
             q = request.url.params
@@ -92,7 +92,7 @@ class FakeOnshape:
                            "documentId": PROD_DOC, "versionId": "9" * 24, "elementId": EL, "partId": "JHD",
                            "documentName": "Robot Gen3", "createdAt": "2026-02-01T00:00:00Z"}],
                 "next": "https://cad.onshape.com/api/revisions/companies/c0mpany?latestOnly=true&limit=100&page=2"})
-        if path == "/api/webhooks" and request.method == "POST":
+        if path == "/api/v6/webhooks" and request.method == "POST":
             return httpx.Response(200, json={"id": "e" * 24})
         if path == "/api/companies":
             return httpx.Response(200, json={"items": [{"id": "c0mpany"}]})
@@ -425,6 +425,49 @@ async def test_policy_tool(server):
     base, _ = server()
     info = _json(await _call(base, "get_server_policy"))
     assert info["write_mode"] == "allowlist" and info["new_documents_are_private"] is True
+
+
+async def test_budget_warning_from_80_percent(server):
+    base, _ = server(onshape_monthly_limit=5)
+    for _ in range(3):
+        result = await _call(base, "get_document", {"documentId": PROD_DOC})
+    assert "Monat 3/5 ·" in _text(result) and "WARNUNG" not in _text(result)  # 60 %
+    assert _json(await _call(base, "get_server_policy"))["budget_warning"] is None
+    result = await _call(base, "get_document", {"documentId": PROD_DOC})  # 4/5 = 80 %
+    line = _text(result).splitlines()[-1]
+    assert line.startswith("[Onshape-API: 1 Aufruf(e)") and line.endswith("]")
+    assert "· WARNUNG Onshape-Budget fast verbraucht: Monat 4/5 (80 %)]" in line
+    policy = await _call(base, "get_server_policy")
+    info = _json(policy)
+    assert "Monat 4/5 (80 %)" in info["budget_warning"] and info["budget_warning_percent"] == 80
+    assert "WARNUNG" in _text(policy).splitlines()[-1]
+    await _call(base, "get_document", {"documentId": PROD_DOC})  # 5/5 = 100 %
+    denied = await _call(base, "get_document", {"documentId": PROD_DOC})
+    line = _text(denied).splitlines()[-1]
+    assert denied.isError and "Monat 5/5 (100 %)" in line and line.endswith("]")
+
+
+async def test_yearly_budget_warning_at_79_and_80_percent(server, tmp_path):
+    from onshape_secure.quota import _now_keys
+
+    day, week, month, year = _now_keys()
+    (tmp_path / "usage.json").write_text(json.dumps({
+        "day": day, "day_count": 0, "week": week, "week_count": 0, "month": month, "month_count": 0,
+        "year": year, "year_count": 78, "attempts": 0,
+    }))
+    base, _ = server(onshape_yearly_limit=100)
+    result = await _call(base, "get_document", {"documentId": PROD_DOC})  # 79/100
+    assert "Jahr 79/100]" in _text(result) and "WARNUNG" not in _text(result)
+    result = await _call(base, "get_document", {"documentId": PROD_DOC})  # 80/100
+    assert _text(result).splitlines()[-1].endswith("· WARNUNG Onshape-Budget fast verbraucht: Jahr 80/100 (80 %)]")
+    assert "Jahr 80/100 (80 %)" in _json(await _call(base, "get_server_policy"))["budget_warning"]
+
+
+async def test_no_budget_warning_without_limits(server):
+    base, _ = server(onshape_daily_limit=0, onshape_weekly_limit=0, onshape_monthly_limit=0, onshape_yearly_limit=0)
+    result = await _call(base, "get_document", {"documentId": PROD_DOC})
+    assert "WARNUNG" not in _text(result)
+    assert _json(await _call(base, "get_server_policy"))["budget_warning"] is None
 
 
 # --- legacy SSE transport ---------------------------------------------------
@@ -770,14 +813,14 @@ async def test_webhook_registration_and_invalidation(server, tmp_path):
     h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     status = httpx.post(base + "/admin/webhook", headers=h).json()
     assert status["registered"] and status["active"]
-    reg = [b for m, p, b in fake.requests if p == "/api/webhooks"]
+    reg = [b for m, p, b in fake.requests if p == "/api/v6/webhooks"]
     assert len(reg) == 1 and reg[0]["isTransient"] is False and reg[0]["companyId"] == "c0mpany"
     assert "onshape.revision.created" in reg[0]["events"]
     secret = MappingStore(str(tmp_path / "mappings.db")).webhook_secret()
     assert reg[0]["url"] == f"http://127.0.0.1/onshape/webhook/{secret}"
     httpx.post(base + "/admin/webhook", headers=h)  # adds the metadata webhook once
     httpx.post(base + "/admin/webhook", headers=h)  # idempotent
-    assert len([1 for _, p, _ in fake.requests if p == "/api/webhooks"]) == 2
+    assert len([1 for _, p, _ in fake.requests if p == "/api/v6/webhooks"]) == 2
 
     # wrong secret is rejected, no token needed for the right one (Onshape can't send it)
     assert httpx.post(base + "/onshape/webhook/wrong", json={}).status_code == 404
@@ -1037,12 +1080,12 @@ async def test_metadata_webhook_is_separate_and_optional(server, tmp_path):
     h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     httpx.post(base + "/admin/webhook", headers=h)  # creates release webhook
     status = httpx.post(base + "/admin/webhook", headers=h).json()  # then the metadata one
-    created = [b for m, p, b in fake.requests if p == "/api/webhooks"]
+    created = [b for m, p, b in fake.requests if p == "/api/v6/webhooks"]
     assert [c["events"] for c in created] == [
         ["onshape.revision.created", "onshape.workflow.transition"], ["onshape.model.lifecycle.metadata"]]
     assert status["metadataEvents"] is True
     httpx.post(base + "/admin/webhook", headers=h)
-    assert len([1 for _, p, _ in fake.requests if p == "/api/webhooks"]) == 2  # idempotent
+    assert len([1 for _, p, _ in fake.requests if p == "/api/v6/webhooks"]) == 2  # idempotent
 
 
 async def test_search_part_index_is_free(server):
@@ -1262,7 +1305,7 @@ async def test_webhook_check_job_has_own_audit_and_shows_in_usage_line(server, t
     MappingStore(str(tmp_path / "mappings.db")).set_meta("webhook_verified_at", str(time.time() - 8 * 86400))
     n = len(fake.requests)
     result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
-    assert ("GET", "/api/webhooks/" + "e" * 24, None) in fake.requests[n:]
+    assert ("GET", "/api/v6/webhooks/" + "e" * 24, None) in fake.requests[n:]
     audits = _audits(capfd.readouterr().err)
     job = [a for a in audits if a["event"] == "job"]
     tool = [a for a in audits if a["action"] == "find_part_by_number"][0]
@@ -1318,7 +1361,7 @@ async def test_vanished_webhook_job_audits_error_and_falls_back(server, tmp_path
     httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
     m = MappingStore(str(tmp_path / "mappings.db"))
     m.set_meta("webhook_verified_at", str(time.time() - 8 * 86400))
-    _intercept(fake, lambda r: httpx.Response(404) if r.url.path == "/api/webhooks/" + "e" * 24 else None)
+    _intercept(fake, lambda r: httpx.Response(404) if r.url.path == "/api/v6/webhooks/" + "e" * 24 else None)
     result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
     assert not result.isError, _text(result)  # the job never fails the tool call
     job = [a for a in _audits(capfd.readouterr().err) if a["event"] == "job"]
@@ -1333,7 +1376,7 @@ async def test_vanished_webhook_job_audits_error_and_falls_back(server, tmp_path
 ])
 def test_webhook_registration_failures_are_audited(server, capfd, answer, error):
     base, fake = server(log_level="INFO")
-    _intercept(fake, lambda r: answer if r.url.path == "/api/webhooks" else None)
+    _intercept(fake, lambda r: answer if r.url.path == "/api/v6/webhooks" else None)
     resp = httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
     assert resp.status_code == 502 and resp.json()["error"] == error
     audit = [a for a in _audits(capfd.readouterr().err) if a["action"] == "admin_webhook"][0]

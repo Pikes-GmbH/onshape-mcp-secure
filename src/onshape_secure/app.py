@@ -36,6 +36,7 @@ from .policy import (
     META,
     READ,
     SYSTEM,
+    WEBHOOKS_PATH,
     WRITE,
     EXTRA_TOOL_NAMES,
     TOOL_CLASSES,
@@ -54,7 +55,7 @@ from .images import ImageStore
 from .mapping import MappingStore
 from .webhooks import METADATA_EVENT, RELEASE_EVENTS
 from .webhooks import make_receiver
-from .quota import OnshapeBudget, QuotaExceeded, RateLimiter
+from .quota import WARN_PERCENT, OnshapeBudget, QuotaExceeded, RateLimiter, budget_warning
 
 ADMIN_SYNC_COOLDOWN = 600  # seconds between two /admin/sync runs
 SYNC_COOLDOWN_KEY = "admin_sync_last"  # mappings.db meta: survives auto-stop restarts (AD-8)
@@ -195,7 +196,7 @@ def _instructions(settings: Settings) -> str:
         "free. Screenshot results contain a markdown image line and exports a markdown download link - include "
         "them unchanged in your reply. Every result ends with an [Onshape-API: ...] line: at the end of your "
         "answer, tell the user the TOTAL Onshape API calls your answer cost (sum of those lines) and the "
-        "current year usage."
+        "current year usage. If that line contains a WARNUNG, quote it to the user and avoid Onshape calls that are not needed."
     )
     lines.append(
         "Assemblies: ground a reference part, read face IDs with get_body_details, create mates in "
@@ -254,7 +255,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
     )
 
     def _usage_line(ctx: dict) -> TextContent:
-        """Cost of this tool call in Onshape API calls - the agent passes it on to the user."""
+        """Cost of this tool call in Onshape API calls plus a budget warning from 80 % month/year usage."""
         b = budget.snapshot()
 
         def part(label, used, limit):
@@ -267,6 +268,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
                 part("Woche", b["this_week_utc"], b["weekly_limit"]),
                 part("Monat", b["this_month_utc"], b["monthly_limit"]),
                 part("Jahr", b["this_year_utc"], b["yearly_limit"]),
+                *([warning] if (warning := budget_warning(b)) else []),
             ]) + "]"
         ))
 
@@ -370,7 +372,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         wid = mapping.meta("webhook_id")
         with _call_scope("job", "verify_webhook", SYSTEM) as job:
             try:
-                info = await upstream.client.get(f"/api/webhooks/{wid}")
+                info = await upstream.client.get(f"{WEBHOOKS_PATH}/{wid}")
             except Exception as exc:  # noqa: BLE001 - the tool call must not fail because of this check
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 job["decision"] = "error"
@@ -444,7 +446,9 @@ def create_app(settings: Settings | None = None) -> Starlette:
             "new_documents_are_private": True,
             "disabled_tools": sorted(settings.disabled_tools),
             "tool_calls_per_minute": settings.tool_calls_per_minute,
-            "onshape_api_budget": budget.snapshot(),
+            "onshape_api_budget": (b := budget.snapshot()),
+            "budget_warning_percent": WARN_PERCENT,
+            "budget_warning": budget_warning(b),
         }
         return json.dumps(info, indent=2)
 
@@ -574,7 +578,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
                 cid = await extra._company()
                 url = f"{settings.public_base_url}/onshape/webhook/{mapping.webhook_secret()}"
                 try:
-                    meta_hook = await upstream.client.post("/api/webhooks", data={
+                    meta_hook = await upstream.client.post(WEBHOOKS_PATH, data={
                         "companyId": cid, "events": [METADATA_EVENT], "url": url,
                         "options": {"collapseEvents": True}, "isTransient": False,
                         "description": "onshape-mcp-secure: part metadata changes",
@@ -592,7 +596,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
             if not mapping.meta("webhook_id"):
                 cid = await extra._company()
                 url = f"{settings.public_base_url}/onshape/webhook/{mapping.webhook_secret()}"
-                created = await upstream.client.post("/api/webhooks", data={
+                created = await upstream.client.post(WEBHOOKS_PATH, data={
                     "companyId": cid, "events": RELEASE_EVENTS, "url": url,
                     "options": {"collapseEvents": False}, "isTransient": False,
                     "description": "onshape-mcp-secure: keep part/drawing mapping table fresh",

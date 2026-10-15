@@ -385,7 +385,10 @@ async def test_read_restriction(server):
     allowed = await _call(base, "get_document", {"documentId": AI_DOC})  # prefixed => allowed
     assert not allowed.isError
     _, tools = await _tools(base)
-    assert "list_documents" not in {t.name for t in tools}
+    names = {t.name for t in tools}
+    assert not names & {"list_documents", "search_documents", "show_mapping_table", "search_part_index",
+                        "export_mapping_table"}
+    assert "find_part_by_number" in names
 
 
 async def test_unknown_tool_denied(server):
@@ -1091,3 +1094,62 @@ async def test_export_mapping_table_csv(server):
     assert lines[0].startswith("Teilenummer;Revision;Typ;Status")
     assert any(l.startswith("PRT-000900;A;Teil;freigegeben") and "DRW-000635 Rev B" in l for l in lines)
     assert any(l.startswith("PRT-000583;") and "nicht freigegeben" in l for l in lines)
+
+
+# --- H-9: read scope applies to every document an own tool reads (AD-14) ----
+
+SCOPE_ONLY = dict(write_mode="off", write_allowed_document_ids=frozenset())  # no write-based read grants
+
+
+async def test_read_scope_hides_drawings_of_other_documents(server):
+    base, fake = server(read_allowed_document_ids=frozenset({PROD_DOC}), **SCOPE_ONLY)
+    fake.filter0_resolves = True  # the drawing lives in LISTED_DOC
+    found = _json(await _call(base, "find_drawing_for_part", {"partNumber": "PRT-000900"}))
+    assert found["partUrl"] and found["drawings"] == []
+    # where-used (PRT-000900) and release package (PRT-000800) point to LISTED_DOC: both dropped,
+    # the export falls back to the drawing in the part's own document instead of failing
+    for pn in ("PRT-000900", "PRT-000800"):
+        result = await _call(base, "export_released_drawing", {"partNumber": pn})
+        assert not result.isError and "Read access" not in _text(result), _text(result)
+    assert not any(LISTED_DOC in p for m, p, _ in fake.requests if m == "POST")
+
+
+async def test_read_scope_drawing_lookup_unchanged_inside_scope(server):
+    base, fake = server(read_allowed_document_ids=frozenset({PROD_DOC, LISTED_DOC}), **SCOPE_ONLY)
+    fake.filter0_resolves = True
+    found = _json(await _call(base, "find_drawing_for_part", {"partNumber": "PRT-000900"}))
+    assert [d["drawingNumber"] for d in found["drawings"]] == ["DRW-000635"]
+
+
+async def test_read_scope_unreleased_lookup_skips_other_documents(server):
+    base, fake = server()
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})  # indexes PROD_DOC (no scope)
+    assert fake.index_calls == 1
+    base, fake = server(read_allowed_document_ids=frozenset({LISTED_DOC}), **SCOPE_ONLY)
+    result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    assert result.isError and "STOP" in _text(result)
+    assert "Anschluss" not in _text(result) and "GEN3 Leg Assembly" not in _text(result)  # no hit, no doc name
+    shot = await _call(base, "capture_part_screenshot", {"partNumber": "PRT-000583"})
+    assert shot.isError and not any(p.endswith("/shadedviews") for _, p, _ in fake.requests)
+    hinted = await _call(base, "find_part_by_number", {"partNumber": "PRT-000583", "documentId": PROD_DOC})
+    assert hinted.isError and "Read access" in _text(hinted)
+
+
+async def test_read_scope_never_indexes_other_documents(server):
+    base, fake = server(read_allowed_document_ids=frozenset({LISTED_DOC}), **SCOPE_ONLY)
+    result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})  # where used -> PROD_DOC
+    assert result.isError and fake.index_calls == 0
+    assert "STOP" in _text(result) and "Read access" not in _text(result)  # skipped, not aborted
+    assert not any(p == f"/api/v6/documents/{PROD_DOC}" for _, p, _ in fake.requests)
+
+
+async def test_read_scope_skips_stale_documents_outside_scope(server, tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})  # indexes PROD_DOC (no scope)
+    MappingStore(str(tmp_path / "mappings.db")).mark_doc_dirty(PROD_DOC)  # stale -> re-index candidate
+    base, fake = server(read_allowed_document_ids=frozenset({LISTED_DOC}), **SCOPE_ONLY)
+    result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000584"})
+    assert result.isError and "STOP" in _text(result) and "Read access" not in _text(result)
+    assert fake.index_calls == 0

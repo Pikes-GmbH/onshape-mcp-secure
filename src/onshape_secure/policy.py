@@ -16,6 +16,9 @@ DELETE = "delete"
 CREATE_DOC = "create_document"
 FEATURESCRIPT = "featurescript"
 META = "meta"
+# cross-document listings (document lists, mapping table / part index): cannot be checked per
+# document, so the whole class is hidden when a read scope is set (AD-14)
+INDEX = "index"
 SYSTEM = "system"  # server-internal maintenance (webhook registration), never reachable by tools
 
 # Every upstream tool must be listed here. Unknown tools are never exposed (fail closed).
@@ -23,8 +26,8 @@ TOOL_CLASSES: dict[str, str] = {
     # read-only
     "get_variables": READ,
     "get_features": READ,
-    "list_documents": READ,
-    "search_documents": READ,
+    "list_documents": INDEX,
+    "search_documents": INDEX,
     "get_document": READ,
     "get_document_summary": READ,
     "find_part_studios": READ,
@@ -79,9 +82,9 @@ TOOL_CLASSES: dict[str, str] = {
     "export_released_model": READ,
     "export_released_drawing": READ,
     "find_drawing_for_part": READ,
-    "show_mapping_table": META,
-    "search_part_index": META,
-    "export_mapping_table": META,
+    "show_mapping_table": INDEX,
+    "search_part_index": INDEX,
+    "export_mapping_table": INDEX,
 }
 
 EXTRA_TOOL_NAMES = {
@@ -166,9 +169,7 @@ def is_tool_enabled(name: str, settings: Settings) -> bool:
         return False
     if cls == FEATURESCRIPT and not settings.allow_featurescript:
         return False
-    if name in {"list_documents", "search_documents", "show_mapping_table", "search_part_index",
-                "export_mapping_table"} \
-            and settings.read_restricted:
+    if cls == INDEX and settings.read_restricted:
         return False
     return True
 

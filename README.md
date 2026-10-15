@@ -155,10 +155,10 @@ Nicht freigegebene Teile sind über die Onshape-API nicht per Teilenummer auffin
 | `WRITE_MODE` | `off` | `off` = nur lesen, `allowlist` = Präfix/IDs, `all` = überall (nicht empfohlen) |
 | `WRITE_ALLOWED_NAME_PREFIX` | `AI-` | Dokumente mit diesem Namensanfang sind beschreibbar; leer = aus |
 | `WRITE_ALLOWED_DOCUMENT_IDS` | leer | Zusätzlich beschreibbare Dokument-IDs (kommagetrennt) |
-| `READ_ALLOWED_DOCUMENT_IDS` | leer | Wenn gesetzt: Lesen nur dort (+ beschreibbare); Liste/Suche wird ausgeblendet |
+| `READ_ALLOWED_DOCUMENT_IDS` | leer | Wenn gesetzt: Lesen nur dort (+ beschreibbare); dokumentübergreifende Tools (Liste/Suche, Mapping-Tabelle, Teile-Index) werden ausgeblendet, Treffer aus anderen Dokumenten weggelassen |
 | `ALLOW_DELETE_FEATURE` | `false` | Features löschen (nur in beschreibbaren Dokumenten) |
 | `ALLOW_FEATURESCRIPT` | `false` | `eval_featurescript` (von Onshape nur lesend ausgeführt); Produktion: `true` |
-| `DISABLED_TOOLS` | leer | Zusätzlich ausgeblendete Tools. `export_part_studio` und `export_assembly` sind immer gesperrt (Ergebnis nicht über ClickUp herunterladbar); die Liste kann nur ergänzen, nicht freischalten |
+| `DISABLED_TOOLS` | leer | Zusätzlich ausgeblendete Tools; unbekannte Namen verhindern den Start. `export_part_studio` und `export_assembly` sind immer gesperrt (Ergebnis nicht über ClickUp herunterladbar); die Liste kann nur ergänzen, nicht freischalten |
 | `ONSHAPE_DAILY_REQUEST_LIMIT` | `500` | Max. abgerechnete Onshape-Requests pro Tag (UTC), 0 = unbegrenzt |
 | `ONSHAPE_WEEKLY_REQUEST_LIMIT` | `600` | dto. pro Kalenderwoche |
 | `ONSHAPE_MONTHLY_REQUEST_LIMIT` | `1000` | dto. pro Monat |

@@ -10,6 +10,7 @@ from onshape_secure import config as cfg
 from onshape_secure.policy import (
     CREATE_DOC,
     DELETE,
+    INDEX,
     META,
     READ,
     WRITE,
@@ -205,7 +206,7 @@ def test_default_disabled_tools_lock_exports(monkeypatch):
 def test_default_settings_expose_no_write_or_featurescript_tool(monkeypatch):
     s = _load(monkeypatch)
     enabled = {name for name in TOOL_CLASSES if is_tool_enabled(name, s)}
-    assert not {name for name in enabled if TOOL_CLASSES[name] not in {READ, META}}
+    assert not {name for name in enabled if TOOL_CLASSES[name] not in {READ, META, INDEX}}
 
 
 @pytest.mark.parametrize("value,extra", [
@@ -375,3 +376,113 @@ def test_redact_path_keeps_only_secret_prefix(path, expected):
     from onshape_secure.auth import redact_path
 
     assert redact_path(path) == expected
+
+
+# --- H-9: read scope via tool class "index" (AD-14) -------------------------
+
+# Published tools in production before H-9/H-10 (fly.toml: no read scope, no DISABLED_TOOLS).
+PRODUCTION_TOOLS = {
+    "capture_assembly_screenshot", "capture_part_screenshot", "capture_part_studio_screenshot",
+    "check_assembly_interference", "eval_featurescript", "export_mapping_table", "export_released_drawing",
+    "export_released_model", "find_drawing_for_part", "find_part_by_number", "find_part_studios", "get_assembly",
+    "get_assembly_features", "get_assembly_positions", "get_body_details", "get_bounding_box", "get_document",
+    "get_document_summary", "get_elements", "get_features", "get_parts", "get_variables", "list_documents",
+    "search_documents", "search_part_index", "show_mapping_table",
+}
+# the hard-coded list is_tool_enabled used before the index class existed
+OLD_READ_SCOPE_BLOCKLIST = {"list_documents", "search_documents", "show_mapping_table", "search_part_index",
+                            "export_mapping_table"}
+
+
+def test_fly_toml_publishes_same_tools_as_before_index_class(monkeypatch):
+    s = _load(monkeypatch, **_fly_env())
+    assert not s.read_restricted
+    assert {n for n in TOOL_CLASSES if is_tool_enabled(n, s)} == PRODUCTION_TOOLS
+
+
+def test_index_class_replaces_read_scope_name_list():
+    assert {n for n, c in TOOL_CLASSES.items() if c == INDEX} == OLD_READ_SCOPE_BLOCKLIST
+
+
+def test_read_scope_hides_index_class_not_names(monkeypatch, settings, tmp_path):
+    monkeypatch.setitem(TOOL_CLASSES, "future_cross_document_tool", INDEX)
+    scoped = make_settings(tmp_path, read_allowed_document_ids=frozenset({PROD_DOC}))
+    assert is_tool_enabled("future_cross_document_tool", settings)
+    assert not is_tool_enabled("future_cross_document_tool", scoped)
+
+
+def test_read_scope_hides_exactly_the_index_class(settings, tmp_path):
+    scoped = make_settings(tmp_path, read_allowed_document_ids=frozenset({PROD_DOC}))
+    open_ = {n for n in TOOL_CLASSES if is_tool_enabled(n, settings)}
+    hidden = open_ - {n for n in TOOL_CLASSES if is_tool_enabled(n, scoped)}
+    assert hidden == {n for n in open_ if TOOL_CLASSES[n] == INDEX} == OLD_READ_SCOPE_BLOCKLIST
+
+
+# --- H-10: tool registration lists agree (AD-2, AD-11) ----------------------
+
+async def test_own_tool_registration_lists_agree():
+    from onshape_mcp import server as upstream
+
+    from onshape_secure.extra_tools import TOOLS, ExtraTools
+    from onshape_secure.policy import EXTRA_TOOL_NAMES
+
+    schemas = [t.name for t in TOOLS]
+    assert len(schemas) == len(set(schemas)), "duplicate tool in extra_tools.TOOLS"
+    handlers = set(ExtraTools(client=None, check_read=None).handlers())
+    assert handlers == EXTRA_TOOL_NAMES, handlers ^ EXTRA_TOOL_NAMES
+    assert set(schemas) <= EXTRA_TOOL_NAMES, set(schemas) - EXTRA_TOOL_NAMES
+    assert EXTRA_TOOL_NAMES <= set(TOOL_CLASSES), EXTRA_TOOL_NAMES - set(TOOL_CLASSES)
+    # own tools without an own schema replace an upstream tool (keeping its schema)
+    upstream_names = {t.name for t in await upstream.list_tools()}
+    assert EXTRA_TOOL_NAMES - set(schemas) <= upstream_names
+    assert not set(schemas) & upstream_names, "own schema shadows an upstream tool"
+
+
+def test_duplicate_own_tool_name_stops_startup(monkeypatch, settings):
+    from onshape_secure import app as app_mod
+
+    monkeypatch.setattr(app_mod, "EXTRA_TOOLS", [*app_mod.EXTRA_TOOLS, app_mod.EXTRA_TOOLS[0]])
+    with pytest.raises(RuntimeError, match=f"duplicate tool names: {app_mod.EXTRA_TOOLS[0].name}"):
+        app_mod.create_app(settings)
+
+
+def test_own_tool_named_like_policy_tool_stops_startup(monkeypatch, settings):
+    from mcp.types import Tool
+
+    from onshape_secure import app as app_mod
+
+    clash = Tool(name=app_mod.POLICY_TOOL, description="x", inputSchema={"type": "object", "properties": {}})
+    monkeypatch.setattr(app_mod, "EXTRA_TOOLS", [*app_mod.EXTRA_TOOLS, clash])
+    with pytest.raises(RuntimeError, match=f"duplicate tool names: {app_mod.POLICY_TOOL}"):
+        app_mod.create_app(settings)
+
+
+async def test_own_tool_colliding_with_upstream_stops_startup(monkeypatch, settings):
+    from mcp.types import Tool
+
+    from onshape_secure import app as app_mod
+
+    clash = Tool(name="get_document", description="x", inputSchema={"type": "object", "properties": {}})
+    monkeypatch.setattr(app_mod, "EXTRA_TOOLS", [*app_mod.EXTRA_TOOLS, clash])
+    app = app_mod.create_app(settings)
+    with pytest.raises(RuntimeError, match="duplicate tool names: get_document"):
+        async with app.router.lifespan_context(app):
+            pass
+
+
+# --- DISABLED_TOOLS names are validated at startup ---------------------------
+
+@pytest.mark.parametrize("names", [{"get_documnet"}, {"get_document", "nope"}])
+def test_unknown_disabled_tool_stops_startup(tmp_path, names):
+    from onshape_secure.app import create_app
+
+    s = make_settings(tmp_path, disabled_tools=frozenset(cfg.DEFAULT_DISABLED_TOOLS) | names)
+    with pytest.raises(cfg.ConfigError, match="unknown tool names: (get_documnet|nope)"):
+        create_app(s)
+
+
+def test_known_disabled_tools_start(tmp_path):
+    from onshape_secure.app import create_app
+
+    create_app(make_settings(tmp_path, disabled_tools=frozenset(cfg.DEFAULT_DISABLED_TOOLS) | {"get_document",
+                                                                                                "show_mapping_table"}))

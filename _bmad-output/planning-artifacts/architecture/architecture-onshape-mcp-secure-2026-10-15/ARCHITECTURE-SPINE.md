@@ -135,7 +135,7 @@ Unveränderliche Einträge werden nie über Teilenummern oder Namen verschlüsse
 
 - **Binds:** alle Tools, `policy.py`
 - **Prevents:** Prompt-Injection über Teilenamen, Beschreibungen oder Tool-Argumente erweitert die Wirkung eines Agents
-- **Rule:** Der maximale Schaden eines manipulierten Agents ist: lesen im Read-Scope, Budget verbrauchen. Darüber hinaus gibt es keinen Kanal nach außen außer Onshape und Capability-Links. Kein Tool folgt URLs aus Daten, verschickt Nachrichten oder schreibt. Ist ein Read-Scope gesetzt (`READ_ALLOWED_DOCUMENT_IDS`), prüft jedes Tool jedes Dokument, das es liest (`check_read`). Tools, die dokumentübergreifend aus der Mapping-DB lesen, haben die Klasse `index` und sind bei gesetztem Read-Scope über die Klasse gesperrt, nicht über eine Namensliste.
+- **Rule:** Der maximale Schaden eines manipulierten Agents ist: lesen im Read-Scope, Budget verbrauchen. Darüber hinaus gibt es keinen Kanal nach außen außer Onshape und Capability-Links. Kein Tool folgt URLs aus Daten, verschickt Nachrichten oder schreibt. Ist ein Read-Scope gesetzt (`READ_ALLOWED_DOCUMENT_IDS`), prüft jedes Tool jedes Dokument, das es liest (`check_read`). Tools, die dokumentübergreifend listen (Mapping-DB, Teile-Index, Dokumentliste/-suche), haben die Klasse `index` und sind bei gesetztem Read-Scope über die Klasse gesperrt, nicht über eine Namensliste.
 
 ### Abhängigkeitsrichtung
 
@@ -250,8 +250,8 @@ docs/                 # Nutzer-Doku (Deutsch)
 | H-6 | Admin-Audit als Freitext; Kosten mal als Requests, mal als billed; Sync-Cooldown nur im Prozess | AD-3, AD-8 |
 | H-7 | Server startet ohne beschreibbares `/data` (Caches/Mapping still aus) | AD-8 |
 | H-8 | **Erledigt 2026-10-15** (war: `auth_failed` loggte den vollen Pfad mit Webhook-Geheimnis/Link-Token; jetzt Präfix + 6 Zeichen, Access-Log explizit aus) | AD-10, AD-13 |
-| H-9 | `find_drawing_for_part` / `_find_unreleased` ohne `check_read`; Read-Scope über Namensliste statt Klasse `index` | AD-14 |
-| H-10 | Kein Test für Übereinstimmung der Tool-Registrierungslisten; doppelte Namen überschreiben still | AD-2, AD-11 |
+| H-9 | **Erledigt 2026-10-15** (war: `find_drawing_for_part` / `_find_unreleased` ohne `check_read`; Read-Scope über Namensliste statt Klasse `index`) | AD-14 |
+| H-10 | **Erledigt 2026-10-15** (war: kein Test für Übereinstimmung der Tool-Registrierungslisten; doppelte Namen überschrieben still) | AD-2, AD-11 |
 | H-11 | `/api/webhooks` ohne API-Version | Konvention Onshape-API-Pfade |
 | H-12 | Budget-Warnung ab 80 % fehlt in der Verbrauchszeile | Betrieb/Monitoring |
 | H-13 | README empfiehlt, Volume-Snapshots abzuschalten | Betrieb/Backups |

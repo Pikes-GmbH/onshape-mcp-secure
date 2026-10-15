@@ -27,7 +27,7 @@ from starlette.routing import Mount, Route
 
 from . import __version__
 from .auth import BearerAuthMiddleware, current_client
-from .config import ADMIN_LABEL, Settings, load_settings
+from .config import ADMIN_LABEL, ConfigError, Settings, load_settings
 from .policy import (
     CREATE_DOC,
     DELETE,
@@ -37,6 +37,7 @@ from .policy import (
     SYSTEM,
     WRITE,
     EXTRA_TOOL_NAMES,
+    TOOL_CLASSES,
     DocumentAccess,
     PolicyDenied,
     check_onshape_request,
@@ -140,9 +141,23 @@ def _deny(message: str, *extra: TextContent) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=message), *extra], isError=True)
 
 
+def _check_tool_registry(settings: Settings) -> None:
+    """Fail at startup on duplicate own tool names and on DISABLED_TOOLS typos (AD-2, AD-10)."""
+    names = [tool.name for tool in EXTRA_TOOLS]
+    duplicates = sorted({n for n in names if names.count(n) > 1} | ({POLICY_TOOL} & set(names)))
+    if duplicates:
+        raise RuntimeError(f"duplicate tool names: {', '.join(duplicates)}")
+    # every upstream tool is in TOOL_CLASSES (test_every_upstream_tool_is_classified); config.py
+    # must not import policy, so the names are checked here
+    unknown = sorted(settings.disabled_tools - set(TOOL_CLASSES) - EXTRA_TOOL_NAMES)
+    if unknown:
+        raise ConfigError(f"DISABLED_TOOLS contains unknown tool names: {', '.join(unknown)}")
+
+
 def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or load_settings()
     _configure_logging(settings.log_level)
+    _check_tool_registry(settings)
 
     # Import the upstream tool implementation only after the configuration is validated.
     from onshape_mcp import server as upstream
@@ -331,7 +346,11 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
     async def _published_tools() -> dict[str, Tool]:
         if not published:
-            for tool in await upstream.list_tools():
+            upstream_tools = await upstream.list_tools()
+            names = [tool.name for tool in upstream_tools] + [tool.name for tool in EXTRA_TOOLS] + [POLICY_TOOL]
+            if duplicates := sorted({n for n in names if names.count(n) > 1}):
+                raise RuntimeError(f"duplicate tool names: {', '.join(duplicates)}")
+            for tool in upstream_tools:
                 if not is_tool_enabled(tool.name, settings):
                     continue
                 published[tool.name] = Tool(
@@ -641,6 +660,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        await _published_tools()  # duplicate tool names stop the server before it accepts requests
         cleaner = asyncio.create_task(_cleanup_loop())  # also runs right at start (after auto-stop)
         async with session_manager.run():
             logger.info(
@@ -669,8 +689,13 @@ def main() -> None:
     except Exception as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
+    try:
+        app = create_app(settings)
+    except ConfigError as exc:  # e.g. unknown DISABLED_TOOLS names
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     uvicorn.run(
-        create_app(settings),
+        app,
         host=settings.host,
         port=settings.port,
         proxy_headers=True,

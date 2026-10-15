@@ -160,10 +160,10 @@ Alle Einstellungen kommen aus Umgebungsvariablen. Geheimnisse liegen als Fly-Sec
 | `WRITE_MODE` | **off** (Standard: off) | `off` = nur lesen · `allowlist` = nur Dokumente mit Präfix oder aus der Liste · `all` = überall |
 | `WRITE_ALLOWED_NAME_PREFIX` | `AI-` | Namenspräfix beschreibbarer Dokumente |
 | `WRITE_ALLOWED_DOCUMENT_IDS` | leer | zusätzlich beschreibbare Dokumente |
-| `READ_ALLOWED_DOCUMENT_IDS` | leer = alle | Lesen optional auf diese Dokumente beschränken |
+| `READ_ALLOWED_DOCUMENT_IDS` | leer = alle | Lesen optional auf diese Dokumente beschränken; blendet Dokumentliste/-suche, Mapping-Tabelle und Teile-Index aus und lässt Treffer und Zeichnungen aus anderen Dokumenten weg |
 | `ALLOW_DELETE_FEATURE` | false (Standard: false) | Features löschen; wirkt nur bei Schreibzugriff |
 | `ALLOW_FEATURESCRIPT` | true (Standard: false) | FeatureScript auswerten (`eval_featurescript`, nur lesend) |
-| `DISABLED_TOOLS` | leer | zusätzlich ausgeblendete Tools; `export_part_studio` und `export_assembly` sind immer gesperrt (auch `DISABLED_TOOLS=""` schaltet sie nicht frei) |
+| `DISABLED_TOOLS` | leer | zusätzlich ausgeblendete Tools (unbekannte Namen verhindern den Start); `export_part_studio` und `export_assembly` sind immer gesperrt (auch `DISABLED_TOOLS=""` schaltet sie nicht frei) |
 | `ONSHAPE_DAILY_REQUEST_LIMIT` | 500 | Onshape-Calls pro Tag (UTC) |
 | `ONSHAPE_WEEKLY_REQUEST_LIMIT` | 600 | pro Woche |
 | `ONSHAPE_MONTHLY_REQUEST_LIMIT` | 1000 | pro Monat |

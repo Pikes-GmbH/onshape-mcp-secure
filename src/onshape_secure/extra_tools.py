@@ -256,6 +256,17 @@ class ExtraTools:
             return f"{self.web_base_url}/documents/{did}/v/{vid}/e/{eid}"
         return None
 
+    async def _readable(self, document_id: str | None) -> bool:
+        """Read scope check that drops a document from results instead of failing the call (AD-14)."""
+        try:
+            await self.check_read(document_id)
+        except PolicyDenied:
+            return False
+        return True
+
+    async def _ws_hits(self, part_number: str) -> list[dict]:
+        return [h for h in self.mapping.find_ws_part(part_number) if await self._readable(h["documentId"])]
+
     # ------------------------------------------------------------------ lookups
 
     async def _company(self) -> str:
@@ -378,25 +389,33 @@ class ExtraTools:
         if self.mapping is None:
             return []
         if document_id:
+            await self.check_read(document_id)
             if not self.mapping.doc_index_fresh(document_id):
                 await self._index_document(document_id)
             return [h for h in self.mapping.find_ws_part(part_number) if h["documentId"] == document_id]
-        hits = self.mapping.find_ws_part(part_number)
+        # with a read scope, documents outside it are neither returned nor indexed (AD-14)
+        hits = await self._ws_hits(part_number)
         fresh = [h for h in hits if self.mapping.doc_index_fresh(h["documentId"])]
         if fresh:
             return fresh
         located = await self._locate_by_where_used(part_number)
-        if located:  # company-wide: document that contains the part -> index it once
+        if located and await self._readable(located):  # company-wide: document that contains the part
             if not self.mapping.doc_index_fresh(located):
                 await self._index_document(located)
-            hits = self.mapping.find_ws_part(part_number)
+            hits = await self._ws_hits(part_number)
             if hits:
                 return hits
         order = [h["documentId"] for h in hits] + self.mapping.known_documents()
-        todo = [d for d in dict.fromkeys(order) if not self.mapping.doc_index_fresh(d)]
-        for did in todo[:MAX_INDEX_DOCS_PER_LOOKUP]:
+        indexed = 0
+        for did in dict.fromkeys(order):
+            if indexed >= MAX_INDEX_DOCS_PER_LOOKUP:
+                break
+            # checked lazily: with a prefix grant check_read may cost a name lookup per document
+            if self.mapping.doc_index_fresh(did) or not await self._readable(did):
+                continue
             await self._index_document(did)
-            hits = self.mapping.find_ws_part(part_number)
+            indexed += 1
+            hits = await self._ws_hits(part_number)
             if hits:
                 break
         return hits
@@ -430,12 +449,12 @@ class ExtraTools:
             self.kv.set(miss_key, True, NOT_FOUND_TTL)
         return None
 
-    def _not_found(self, part_number: str) -> PolicyDenied:
+    async def _not_found(self, part_number: str) -> PolicyDenied:
         docs = []
         if self.mapping is not None:
             for did in self.mapping.known_documents()[:10]:
                 st = self.mapping.doc_state(did)
-                if st and st.get("name"):
+                if st and st.get("name") and await self._readable(did):
                     docs.append(st["name"])
         where = f" Searched: {', '.join(docs)}." if docs else ""
         return NotFound(
@@ -453,7 +472,7 @@ class ExtraTools:
                 raise
             hits = await self._find_unreleased(part_number, args.get("documentId"))
             if not hits:
-                raise self._not_found(part_number) from None
+                raise await self._not_found(part_number) from None
             out = {
                 "partNumber": part_number,
                 "released": False,
@@ -491,7 +510,7 @@ class ExtraTools:
 
     async def find_drawing_for_part(self, args: dict) -> list:
         part = await self._model_revision(args.get("partNumber", ""), args.get("revision"))
-        found = await self._drawings_where_used(part)
+        found = [d for d in await self._drawings_where_used(part) if await self._readable(d.get("documentId"))]
         out = {
             "part": f"{part.get('partNumber')} Rev {part.get('revision')} {part.get('name') or ''}".strip(),
             "partUrl": self._url(part.get("documentId"), part.get("versionId"), part.get("elementId")),
@@ -570,7 +589,7 @@ class ExtraTools:
                     raise
                 hits = await self._find_unreleased(args["partNumber"].strip(), args.get("documentId"))
                 if len(hits) != 1:
-                    raise (self._not_found(args["partNumber"]) if not hits else PolicyDenied(
+                    raise (await self._not_found(args["partNumber"]) if not hits else PolicyDenied(
                         "Part number exists several times in the working state - use find_part_by_number "
                         "and pass the IDs.")) from None
                 h = hits[0]
@@ -690,7 +709,7 @@ class ExtraTools:
         wanted = args.get("drawingElementId")
 
         # 1) Where Used of the released part version (what the Onshape UI shows) - 1 call, cached 1 h
-        found = await self._drawings_where_used(part)
+        found = [d for d in await self._drawings_where_used(part) if await self._readable(d.get("documentId"))]
         if wanted:
             found = [d for d in found if d["elementId"] == wanted]
         if len(found) == 1:
@@ -712,7 +731,7 @@ class ExtraTools:
         # 2) fallbacks for setups without Where Used results
         label = f"{part.get('partNumber')}_Rev{part.get('revision')}_drawing"
         if not wanted:
-            in_package = await self._drawings_in_release(part)
+            in_package = [d for d in await self._drawings_in_release(part) if await self._readable(d["documentId"])]
             if len(in_package) == 1:
                 d = in_package[0]
                 await self.check_read(d["documentId"])
@@ -988,7 +1007,8 @@ class ExtraTools:
         return {"partsChecked": min(len(todo), max_parts), "partsWithDrawing": linked,
                 "remaining": max(0, len(todo) - max_parts)}
 
-    def handler(self, name: str):
+    def handlers(self) -> dict[str, Callable[[dict], Awaitable[list]]]:
+        """Tool name -> implementation; must match TOOLS, policy.TOOL_CLASSES and policy.EXTRA_TOOL_NAMES."""
         return {
             "find_part_by_number": self.find_part_by_number,
             "get_parts": self.get_parts,
@@ -999,4 +1019,7 @@ class ExtraTools:
             "capture_part_screenshot": self.capture_part_screenshot,
             "export_released_model": self.export_released_model,
             "export_released_drawing": self.export_released_drawing,
-        }[name]
+        }
+
+    def handler(self, name: str):
+        return self.handlers()[name]

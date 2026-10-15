@@ -1,0 +1,55 @@
+# Fly.io config - change "app" to a unique name before the first deploy.
+app = "pikes-onshape-mcp"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  WRITE_MODE = "off"
+  WRITE_ALLOWED_NAME_PREFIX = "AI-"
+  ALLOW_DELETE_FEATURE = "true"
+  ALLOW_FEATURESCRIPT = "true"
+  ONSHAPE_DAILY_REQUEST_LIMIT = "500"     # Onshape plan: 2500 calls/year for the company
+  ONSHAPE_WEEKLY_REQUEST_LIMIT = "600"
+  ONSHAPE_MONTHLY_REQUEST_LIMIT = "1000"
+  ONSHAPE_YEARLY_REQUEST_LIMIT = "2400"
+  TOOL_CALLS_PER_MINUTE = "30"
+  LOG_LEVEL = "INFO"
+  IMAGE_LINKS = "true"
+  IMAGE_LINK_TTL_HOURS = "24"
+  FILE_CACHE_HOURS = "24"
+  USAGE_FILE = "/data/usage.json"
+  # ONSHAPE_BASE_URL = "https://pikes.onshape.com"   # only for an Enterprise stack
+  # ALLOWED_HOSTS = "pikes-onshape-mcp.fly.dev"       # optional Host header check
+  # Secrets (set with `fly secrets set`, never here):
+  #   ONSHAPE_ACCESS_KEY, ONSHAPE_SECRET_KEY, MCP_AUTH_TOKENS, WRITE_ALLOWED_DOCUMENT_IDS
+
+# Persists the Onshape API budget counter across restarts
+[[mounts]]
+  source = "onshape_mcp_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

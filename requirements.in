@@ -1,0 +1,7 @@
+mcp==1.30.0
+httpx==0.28.1
+pydantic==2.14.1
+python-dotenv==1.2.4
+starlette==1.8.0
+uvicorn==0.54.0
+loguru==0.7.3

@@ -20,6 +20,16 @@ User docs: `docs/DOKUMENTATION.md` (German). Setup/details: `README.md`.
 - `tests/` – our tests (`test_units.py`, `test_e2e.py` with a fake Onshape via httpx MockTransport). `upstream_tests/` – upstream tests.
 - `_bmad/`, `.claude/skills/bmad-*` – BMAD Method v6.12.4 (German). Planning output goes to `_bmad-output/` (committed).
 
+## Workflow: BMAD Method (mandatory)
+All non-trivial work follows BMAD (`_bmad/`, skills in `.claude/skills/bmad-*`, docs: https://docs.bmad-method.org/). Skills need `uv` on PATH.
+- Unsure where we are or what's next → `bmad-help`.
+- New idea / larger feature → `bmad-brainstorming` or `bmad-product-brief` → `bmad-prd` → `bmad-architecture` → `bmad-create-epics-and-stories` → `bmad-sprint-planning`.
+- Smaller change, bug fix → `bmad-spec` (short SPEC.md), then `bmad-build`.
+- Implementing a story/feature/fix → `bmad-build` (plan, implement, review, verify). Then `bmad-code-review`.
+- Plan changes mid-way → `bmad-correct-course`. After an epic → `bmad-retrospective`.
+- Skip BMAD only for trivial mechanical edits (typos, formatting, config hygiene) or pure ops (deploy, logs, secrets).
+- All artefacts go to `_bmad-output/` (planning-artifacts, implementation-artifacts) and are committed. Project knowledge lives in `docs/`.
+
 ## Hard rules
 - **Onshape API budget is tiny: 2,500 calls/year for the whole company.** Every feature must minimise Onshape calls: cache immutable data (versions/revisions) forever, use the mapping table first, batch endpoints, never "explore".
   Server limits: 500/day, 600/week, 1000/month, 2400/year (set in `fly.toml`, Eric decides changes).

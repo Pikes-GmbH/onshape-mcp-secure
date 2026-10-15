@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 import json
+import re
 
 import pytest
 
@@ -8,6 +10,7 @@ from onshape_secure import config as cfg
 from onshape_secure.policy import (
     CREATE_DOC,
     DELETE,
+    META,
     READ,
     WRITE,
     TOOL_CLASSES,
@@ -136,21 +139,99 @@ GOOD_ENV = {
 }
 
 
+# Every env var load_settings() reads, so default tests do not depend on the shell.
+CONFIG_ENV = set(re.findall(r'os\.(?:getenv|environ\.get)\("([A-Z_]+)"|_(?:bool|int|csv|doc_ids)\("([A-Z_]+)"',
+                            inspect.getsource(cfg)))
+CONFIG_ENV = {name for pair in CONFIG_ENV for name in pair if name} - set(GOOD_ENV)
+assert {"WRITE_MODE", "ALLOW_DELETE_FEATURE", "ALLOW_FEATURESCRIPT", "ENABLE_LEGACY_SSE",
+        "DISABLED_TOOLS", "PUBLIC_BASE_URL", "FLY_APP_NAME"} <= CONFIG_ENV
+
+
 def _load(monkeypatch, **env):
     for key in list(cfg.os.environ):
-        if key in {"MCP_AUTH_TOKENS", "WRITE_MODE", "ONSHAPE_BASE_URL", "WRITE_ALLOWED_DOCUMENT_IDS",
-                   "DISABLED_TOOLS", "WRITE_ALLOWED_NAME_PREFIX", "ADMIN_TOKEN"}:
+        if key in CONFIG_ENV:
             monkeypatch.delenv(key, raising=False)
     for key, value in {**GOOD_ENV, **env}.items():
         monkeypatch.setenv(key, value)
     return cfg.load_settings()
 
 
+def _fly_env() -> dict[str, str]:
+    import pathlib
+    import tomllib
+
+    fly = pathlib.Path(__file__).resolve().parent.parent / "fly.toml"
+    return {k: str(v) for k, v in tomllib.loads(fly.read_text(encoding="utf-8"))["env"].items()}
+
+
 def test_config_defaults(monkeypatch):
     s = _load(monkeypatch)
-    assert s.write_mode == "allowlist" and s.write_allowed_name_prefix == "AI-"
+    assert s.write_allowed_name_prefix == "AI-"
     assert s.auth_tokens == {"x" * 40: "clickup"}
-    assert "export_part_studio" in s.disabled_tools
+
+
+# AD-10: every security-relevant setting defaults to its most restrictive value.
+def test_default_write_mode_is_off(monkeypatch):
+    assert _load(monkeypatch).write_mode == "off"
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_blank_write_mode_is_off(monkeypatch, value):
+    assert _load(monkeypatch, WRITE_MODE=value).write_mode == "off"
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_default_delete_feature_is_off(monkeypatch, value):
+    env = {} if value is None else {"ALLOW_DELETE_FEATURE": value}
+    assert _load(monkeypatch, **env).allow_delete is False
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_default_featurescript_is_off(monkeypatch, value):
+    env = {} if value is None else {"ALLOW_FEATURESCRIPT": value}
+    assert _load(monkeypatch, **env).allow_featurescript is False
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_default_legacy_sse_is_off(monkeypatch, value):
+    env = {} if value is None else {"ENABLE_LEGACY_SSE": value}
+    assert _load(monkeypatch, **env).enable_legacy_sse is False
+
+
+def test_default_disabled_tools_lock_exports(monkeypatch):
+    assert _load(monkeypatch).disabled_tools == frozenset(cfg.DEFAULT_DISABLED_TOOLS)
+
+
+def test_default_settings_expose_no_write_or_featurescript_tool(monkeypatch):
+    s = _load(monkeypatch)
+    enabled = {name for name in TOOL_CLASSES if is_tool_enabled(name, s)}
+    assert not {name for name in enabled if TOOL_CLASSES[name] not in {READ, META}}
+
+
+@pytest.mark.parametrize("value,extra", [
+    ("", set()),
+    ("get_document", {"get_document"}),
+    (" get_document , export_assembly ", {"get_document"}),
+])
+def test_disabled_tools_extend_default_lock(monkeypatch, value, extra):
+    s = _load(monkeypatch, DISABLED_TOOLS=value)
+    assert s.disabled_tools == frozenset(cfg.DEFAULT_DISABLED_TOOLS) | extra
+    assert not is_tool_enabled("export_part_studio", s)
+
+
+def test_fly_toml_keeps_production_behaviour(monkeypatch, tmp_path):
+    env = _fly_env()
+    s = _load(monkeypatch, **env)
+    assert s.write_mode == "off"
+    assert s.allow_featurescript is True and s.enable_legacy_sse is True
+    assert s.allow_delete is False
+    # Published tools equal those of the pre-H-1 production flags (delete was on, but
+    # WRITE_MODE=off already hid the delete class).
+    before = make_settings(tmp_path, write_mode="off", allow_delete=True, allow_featurescript=True,
+                           enable_legacy_sse=True, write_allowed_document_ids=frozenset())
+    now_tools = {n for n in TOOL_CLASSES if is_tool_enabled(n, s)}
+    before_tools = {n for n in TOOL_CLASSES if is_tool_enabled(n, before)}
+    assert now_tools == before_tools
 
 
 @pytest.mark.parametrize("env", [

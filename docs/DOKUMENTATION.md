@@ -10,7 +10,7 @@ Der Onshape-MCP-Server gibt ClickUp Brain und Super Agents Zugriff auf Onshape, 
 - **Eigene Erweiterungen:** Teilenummer-Suche, Zeichnungs-Zuordnung, STEP- und PDF-Export, Zuordnungstabelle mit Cache, Kostenanzeige je Anfrage.
 - **Onshape-Zugang:** ein API-Key mit Lese- und Schreibrecht (derzeit Erics Account). Alle ClickUp-Nutzer arbeiten über diesen einen Zugang.
 - **Aktueller Modus:** nur lesen. Schreibende Tools sind abgeschaltet.
-- **Code:** Projektordner `onshape-mcp-secure` (Python 3.12, Docker), 131 automatische Tests.
+- **Code:** Projektordner `onshape-mcp-secure` (Python 3.12, Docker), 156 automatische Tests.
 
 ## Nutzung in ClickUp
 
@@ -150,19 +150,20 @@ Der Server läuft als eine Fly.io-Maschine in Frankfurt (App `pikes-onshape-mcp`
 
 ## Konfiguration
 
-Alle Einstellungen kommen aus Umgebungsvariablen. Geheimnisse liegen als Fly-Secrets, alles andere in `fly.toml` (Änderung → neu deployen). Bei ungültigen Werten startet der Server nicht (fail closed).
+Alle Einstellungen kommen aus Umgebungsvariablen. Geheimnisse liegen als Fly-Secrets, alles andere in `fly.toml` (Änderung → neu deployen). Bei ungültigen Werten startet der Server nicht (fail closed). Die Rechte-Schalter (`WRITE_MODE`, `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT`, `ENABLE_LEGACY_SSE`) stehen ohne Eintrag auf aus; `fly.toml` schaltet bewusst frei, was Produktion braucht.
 
 | Variable | Aktuell / Standard | Bedeutung |
 | --- | --- | --- |
 | `ONSHAPE_ACCESS_KEY`, `ONSHAPE_SECRET_KEY` | Fly-Secret | API-Key des gemeinsamen Onshape-Accounts |
 | `MCP_AUTH_TOKENS` | Fly-Secret | Bearer-Tokens der Clients, Format `label:token`, mind. 32 Zeichen, kommagetrennt |
 | `ADMIN_TOKEN` | Fly-Secret | eigenes Token nur für die Admin-Endpunkte |
-| `WRITE_MODE` | **off** | `off` = nur lesen · `allowlist` = nur Dokumente mit Präfix oder aus der Liste · `all` = überall |
+| `WRITE_MODE` | **off** (Standard: off) | `off` = nur lesen · `allowlist` = nur Dokumente mit Präfix oder aus der Liste · `all` = überall |
 | `WRITE_ALLOWED_NAME_PREFIX` | `AI-` | Namenspräfix beschreibbarer Dokumente |
 | `WRITE_ALLOWED_DOCUMENT_IDS` | leer | zusätzlich beschreibbare Dokumente |
 | `READ_ALLOWED_DOCUMENT_IDS` | leer = alle | Lesen optional auf diese Dokumente beschränken |
-| `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT` | true | wirken nur bei Schreibzugriff |
-| `DISABLED_TOOLS` | `export_part_studio`, `export_assembly` | ausgeblendete Tools |
+| `ALLOW_DELETE_FEATURE` | false (Standard: false) | Features löschen; wirkt nur bei Schreibzugriff |
+| `ALLOW_FEATURESCRIPT` | true (Standard: false) | FeatureScript auswerten (`eval_featurescript`, nur lesend) |
+| `DISABLED_TOOLS` | leer | zusätzlich ausgeblendete Tools; `export_part_studio` und `export_assembly` sind immer gesperrt (auch `DISABLED_TOOLS=""` schaltet sie nicht frei) |
 | `ONSHAPE_DAILY_REQUEST_LIMIT` | 500 | Onshape-Calls pro Tag (UTC) |
 | `ONSHAPE_WEEKLY_REQUEST_LIMIT` | 600 | pro Woche |
 | `ONSHAPE_MONTHLY_REQUEST_LIMIT` | 1000 | pro Monat |
@@ -177,7 +178,7 @@ Alle Einstellungen kommen aus Umgebungsvariablen. Geheimnisse liegen als Fly-Sec
 | `USAGE_FILE` | `/data/usage.json` | Zählerstand des Budgets |
 | `ONSHAPE_BASE_URL` | cad.onshape.com | nur `*.onshape.com` zulässig |
 | `ALLOWED_HOSTS` | leer | optionale Host-Header-Prüfung |
-| `ENABLE_LEGACY_SSE` | true | alter SSE-Transport zusätzlich zu `/mcp` |
+| `ENABLE_LEGACY_SSE` | true (Standard: false) | alter SSE-Transport zusätzlich zu `/mcp` |
 | `MAX_RESPONSE_CHARS` / `MAX_REQUEST_BYTES` | 60.000 / 1 MB | Größenlimits |
 | `LOG_LEVEL`, `PORT` | INFO, 8080 | Server |
 

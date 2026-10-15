@@ -23,6 +23,8 @@ EL = "e" * 24
 
 
 def make_settings(tmp_path, **overrides) -> Settings:
+    # Deliberately permissive (write/delete/FeatureScript/SSE on) so the guards can be
+    # exercised; production defaults are tested via load_settings() in test_units.py.
     base = dict(
         onshape_access_key="test-access",
         onshape_secret_key="test-secret",

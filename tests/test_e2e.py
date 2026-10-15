@@ -259,6 +259,13 @@ def test_mcp_requires_token(server, headers):
         assert resp.status_code == 401, path
 
 
+def test_legacy_sse_not_routed_when_off(server):
+    base, _ = server(enable_legacy_sse=False)
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    assert httpx.get(f"{base}/sse", headers=auth).status_code == 404
+    assert httpx.post(f"{base}/messages/", headers=auth, json={}).status_code == 404
+
+
 def test_x_api_key_header_accepted(server):
     base, _ = server()
     resp = httpx.post(

@@ -645,7 +645,9 @@ def create_app(settings: Settings | None = None) -> Starlette:
         async with session_manager.run():
             logger.info(
                 f"onshape-mcp-secure {__version__} ready: write_mode={settings.write_mode}, "
-                f"prefix={settings.write_allowed_name_prefix!r}, clients={len(settings.auth_tokens)}, "
+                f"prefix={settings.write_allowed_name_prefix!r}, allow_delete={settings.allow_delete}, "
+                f"featurescript={settings.allow_featurescript}, legacy_sse={settings.enable_legacy_sse}, "
+                f"disabled_tools={sorted(settings.disabled_tools)}, clients={len(settings.auth_tokens)}, "
                 f"budget={budget.snapshot()}"
             )
             yield

@@ -85,7 +85,7 @@ Nur Workspace-Owner/Admins, nur in der Browser-App:
 
 Falls die Verbindung scheitert:
 - Auth auf *No authentication* stellen und Custom Header `Authorization: Bearer <TOKEN>` (alternativ `X-API-Key: <TOKEN>`) setzen.
-- Falls ClickUp nur SSE spricht: URL `https://…/sse` verwenden.
+- Falls ClickUp nur SSE spricht: URL `https://…/sse` verwenden (braucht `ENABLE_LEGACY_SSE=true`, in `fly.toml` gesetzt).
 
 ### 4. So arbeitet die KI damit
 
@@ -152,13 +152,13 @@ Nicht freigegebene Teile sind über die Onshape-API nicht per Teilenummer auffin
 | `ONSHAPE_ACCESS_KEY` / `ONSHAPE_SECRET_KEY` | – | **Secret.** API-Key des Service-Accounts |
 | `MCP_AUTH_TOKENS` | – | **Secret.** `label:token,label2:token2` – Label erscheint im Audit-Log (Label `admin` ist reserviert) |
 | `ADMIN_TOKEN` | – | **Secret.** Eigenes Token nur für `/admin/*` (min. 32 Zeichen). Client-Tokens wie das von ClickUp erhalten dort 403; `/admin/sync` höchstens alle 10 Minuten |
-| `WRITE_MODE` | `allowlist` | `off` = nur lesen, `allowlist` = Präfix/IDs, `all` = überall (nicht empfohlen) |
+| `WRITE_MODE` | `off` | `off` = nur lesen, `allowlist` = Präfix/IDs, `all` = überall (nicht empfohlen) |
 | `WRITE_ALLOWED_NAME_PREFIX` | `AI-` | Dokumente mit diesem Namensanfang sind beschreibbar; leer = aus |
 | `WRITE_ALLOWED_DOCUMENT_IDS` | leer | Zusätzlich beschreibbare Dokument-IDs (kommagetrennt) |
 | `READ_ALLOWED_DOCUMENT_IDS` | leer | Wenn gesetzt: Lesen nur dort (+ beschreibbare); Liste/Suche wird ausgeblendet |
-| `ALLOW_DELETE_FEATURE` | `true` | Features löschen (nur in beschreibbaren Dokumenten) |
-| `ALLOW_FEATURESCRIPT` | `true` | `eval_featurescript` (von Onshape nur lesend ausgeführt) |
-| `DISABLED_TOOLS` | `export_part_studio,export_assembly` | Ausgeblendete Tools. Export ist aus, weil das Ergebnis nicht über ClickUp herunterladbar ist |
+| `ALLOW_DELETE_FEATURE` | `false` | Features löschen (nur in beschreibbaren Dokumenten) |
+| `ALLOW_FEATURESCRIPT` | `false` | `eval_featurescript` (von Onshape nur lesend ausgeführt); Produktion: `true` |
+| `DISABLED_TOOLS` | leer | Zusätzlich ausgeblendete Tools. `export_part_studio` und `export_assembly` sind immer gesperrt (Ergebnis nicht über ClickUp herunterladbar); die Liste kann nur ergänzen, nicht freischalten |
 | `ONSHAPE_DAILY_REQUEST_LIMIT` | `500` | Max. abgerechnete Onshape-Requests pro Tag (UTC), 0 = unbegrenzt |
 | `ONSHAPE_WEEKLY_REQUEST_LIMIT` | `600` | dto. pro Kalenderwoche |
 | `ONSHAPE_MONTHLY_REQUEST_LIMIT` | `1000` | dto. pro Monat |
@@ -167,7 +167,7 @@ Nicht freigegebene Teile sind über die Onshape-API nicht per Teilenummer auffin
 | `MAX_CONCURRENT_CALLS` | `4` | Parallele Tool-Ausführungen |
 | `ONSHAPE_BASE_URL` | `https://cad.onshape.com` | Nur `https://*.onshape.com` erlaubt |
 | `ALLOWED_HOSTS` | leer | Optionale Host-Header-Prüfung, z. B. `pikes-onshape-mcp.fly.dev` |
-| `ENABLE_LEGACY_SSE` | `true` | `/sse`-Endpunkt für ältere Clients |
+| `ENABLE_LEGACY_SSE` | `false` | `/sse`-Endpunkt für ältere Clients; Produktion: `true` |
 | `MAX_RESPONSE_CHARS` / `MAX_REQUEST_BYTES` | `60000` / `1000000` | Größenlimits |
 | `IMAGE_LINKS` | `true` | Screenshots zusätzlich als Bild-Link (`/img/<zufall>.png`), damit ClickUp sie anzeigt |
 | `IMAGE_LINK_TTL_HOURS` | `24` | Gültigkeit der Bild-Links (1–168 h), danach gelöscht |
@@ -177,7 +177,7 @@ Nicht freigegebene Teile sind über die Onshape-API nicht per Teilenummer auffin
 
 **Budget richtig wählen:** Onshape erlaubt pro Jahr z. B. 5.000 API-Calls pro Nutzer (Professional) bzw. 10.000 (Enterprise) – als Firmen-Pool. Faustregel: Monatslimit ≈ (Jahrespool − andere API-Nutzung) ÷ 12. Ein Tool-Aufruf braucht meist 1–3 Requests, Interferenz-Checks mehr. Aktueller Stand: Tool `get_server_policy`.
 
-Rechte ändern: Wert in `fly.toml` anpassen + `fly deploy` (z. B. `WRITE_MODE = "off"` als Notbremse → nur noch lesen).
+Die Rechte-Schalter (`WRITE_MODE`, `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT`, `ENABLE_LEGACY_SSE`) stehen im Code standardmäßig auf aus; `fly.toml` schaltet bewusst frei, was Produktion braucht. Rechte ändern: Wert in `fly.toml` anpassen + `fly deploy` (z. B. `WRITE_MODE = "off"` als Notbremse → nur noch lesen).
 
 ## Betrieb
 

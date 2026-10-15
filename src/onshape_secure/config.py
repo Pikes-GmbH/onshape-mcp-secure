@@ -116,8 +116,9 @@ def _public_base_url() -> str:
     return raw
 
 
-# Tools that are hidden unless explicitly re-enabled. The export tools only start a
-# translation job inside Onshape; the result cannot be downloaded through ClickUp.
+# Tools that are always hidden; DISABLED_TOOLS can only add to this set (re-enabling
+# needs a code change). The export tools only start a translation job inside Onshape;
+# the result cannot be downloaded through ClickUp.
 DEFAULT_DISABLED_TOOLS = ("export_part_studio", "export_assembly")
 
 
@@ -166,7 +167,9 @@ def load_settings() -> Settings:
     if not access_key or not secret_key:
         raise ConfigError("ONSHAPE_ACCESS_KEY and ONSHAPE_SECRET_KEY are required")
 
-    write_mode = os.getenv("WRITE_MODE", "allowlist").strip().lower()
+    # The permission switches (WRITE_MODE, ALLOW_*, ENABLE_LEGACY_SSE) default to their most
+    # restrictive value (AD-10); fly.toml opts in explicitly to what production needs.
+    write_mode = os.getenv("WRITE_MODE", "").strip().lower() or "off"
     if write_mode not in {"off", "allowlist", "all"}:
         raise ConfigError("WRITE_MODE must be one of: off, allowlist, all")
 
@@ -176,10 +179,7 @@ def load_settings() -> Settings:
     if prefix and len(prefix.strip()) < 2:
         raise ConfigError("WRITE_ALLOWED_NAME_PREFIX must be at least 2 visible characters (or empty)")
 
-    disabled_raw = os.getenv("DISABLED_TOOLS")
-    disabled = (
-        frozenset(DEFAULT_DISABLED_TOOLS) if disabled_raw is None else frozenset(_csv("DISABLED_TOOLS"))
-    )
+    disabled = frozenset(DEFAULT_DISABLED_TOOLS) | frozenset(_csv("DISABLED_TOOLS"))
 
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
@@ -194,8 +194,8 @@ def load_settings() -> Settings:
         write_allowed_document_ids=_doc_ids("WRITE_ALLOWED_DOCUMENT_IDS"),
         write_allowed_name_prefix=prefix,
         read_allowed_document_ids=_doc_ids("READ_ALLOWED_DOCUMENT_IDS"),
-        allow_delete=_bool("ALLOW_DELETE_FEATURE", True),
-        allow_featurescript=_bool("ALLOW_FEATURESCRIPT", True),
+        allow_delete=_bool("ALLOW_DELETE_FEATURE", False),
+        allow_featurescript=_bool("ALLOW_FEATURESCRIPT", False),
         disabled_tools=disabled,
         tool_calls_per_minute=_int("TOOL_CALLS_PER_MINUTE", 30, 1, 600),
         max_concurrent_calls=_int("MAX_CONCURRENT_CALLS", 4, 1, 32),
@@ -206,7 +206,7 @@ def load_settings() -> Settings:
         usage_file=os.getenv("USAGE_FILE", "/data/usage.json").strip(),
         max_response_chars=_int("MAX_RESPONSE_CHARS", 60_000, 1_000, 2_000_000),
         max_request_bytes=_int("MAX_REQUEST_BYTES", 1_000_000, 10_000, 20_000_000),
-        enable_legacy_sse=_bool("ENABLE_LEGACY_SSE", True),
+        enable_legacy_sse=_bool("ENABLE_LEGACY_SSE", False),
         allowed_hosts=tuple(h.lower() for h in _csv("ALLOWED_HOSTS")),
         log_level=log_level,
         host=os.getenv("HOST", "0.0.0.0").strip(),

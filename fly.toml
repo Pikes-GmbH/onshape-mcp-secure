@@ -6,10 +6,12 @@ primary_region = "fra"
   dockerfile = "Dockerfile"
 
 [env]
+  # Code defaults are the most restrictive values; production opts in explicitly here.
   WRITE_MODE = "off"
   WRITE_ALLOWED_NAME_PREFIX = "AI-"
-  ALLOW_DELETE_FEATURE = "true"
-  ALLOW_FEATURESCRIPT = "true"
+  ALLOW_DELETE_FEATURE = "false"
+  ALLOW_FEATURESCRIPT = "true"            # eval_featurescript (read-only evaluation)
+  ENABLE_LEGACY_SSE = "true"              # /sse for older clients; off once logs show ClickUp only uses /mcp
   ONSHAPE_DAILY_REQUEST_LIMIT = "500"     # Onshape plan: 2500 calls/year for the company
   ONSHAPE_WEEKLY_REQUEST_LIMIT = "600"
   ONSHAPE_MONTHLY_REQUEST_LIMIT = "1000"

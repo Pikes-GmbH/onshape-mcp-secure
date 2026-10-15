@@ -504,6 +504,19 @@ def test_auth_failure_log_is_escaped(server, capfd):
     assert "\n2026-01-01 AUDIT forged" not in out
 
 
+def test_auth_failure_log_hides_secret_paths(server, capfd):
+    base, _ = server()
+    secret = "S3cr3tPathValue" + "x" * 30
+    httpx.get(f"{base}/onshape/webhook/{secret}")  # GET is not the public webhook route
+    httpx.post(f"{base}/img/{secret}.png")
+    httpx.post(f"{base}/dl/{secret}/part.step")
+    out = "".join(capfd.readouterr())
+    assert out.count("auth_failed") == 3
+    assert secret not in out and "S3cr3tP" not in out
+    for prefix in ("/onshape/webhook/", "/img/", "/dl/"):
+        assert f'"{prefix}S3cr3t..."' in out
+
+
 # --- part numbers & image links --------------------------------------------------
 
 
@@ -865,6 +878,120 @@ async def test_metadata_webhook_marks_index_stale(server, tmp_path):
                json={"event": "onshape.model.lifecycle.metadata", "webhookId": "e" * 24, "documentId": PROD_DOC})
     await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
     assert fake.index_calls == 2  # re-indexed once after the change
+
+
+def test_webhook_ping_never_raises_trust(server, tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    base, _ = server()
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    assert httpx.post(base + "/admin/webhook", headers=h).json()["active"]  # registration verifies
+    m = MappingStore(str(tmp_path / "mappings.db"))
+    stale = str(time.time() - 9 * 86400)
+    m.set_meta("webhook_verified_at", stale)
+    hook = base + f"/onshape/webhook/{m.webhook_secret()}"
+    for name in ("webhook.ping", "webhook.register"):
+        assert httpx.post(hook, json={"event": name, "webhookId": "e" * 24}).status_code == 200
+    assert m.meta("webhook_verified_at") == stale
+    assert httpx.get(base + "/admin/webhook", headers=h).json()["active"] is False
+
+
+async def test_webhook_events_of_unknown_webhooks_ignored(server, tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    m = MappingStore(str(tmp_path / "mappings.db"))
+    hook = base + f"/onshape/webhook/{m.webhook_secret()}"
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
+    n = len(fake.requests)
+    event = {"event": "onshape.revision.created", "partNumber": "PRT-000593", "elementType": 0}
+    for wid in ({}, {"webhookId": "9" * 24}, {"webhookId": ["e" * 24]}, {"webhookId": None}):
+        assert httpx.post(hook, json={**event, **wid}).status_code == 200
+    assert m.meta("webhook_last_event_at") is None  # nothing written
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
+    assert len(fake.requests) == n  # still answered from the table
+
+
+async def test_webhook_events_accepted_before_registration(server, tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
+    n = len(fake.requests)
+    hook = base + f"/onshape/webhook/{MappingStore(str(tmp_path / 'mappings.db')).webhook_secret()}"
+    event = {"event": "onshape.revision.created", "partNumber": "PRT-000593", "elementType": 0}
+    assert httpx.post(hook, json=event).status_code == 200
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
+    assert len(fake.requests) == n + 1  # invalidated, re-checked once
+    for name in ("webhook.ping", "webhook.register"):
+        httpx.post(hook, json={"event": name})
+    assert MappingStore(str(tmp_path / "mappings.db")).meta("webhook_verified_at") is None  # stays empty
+
+
+@pytest.mark.parametrize("name", ["onshape.revision.created", "onshape.workflow.transition"])
+@pytest.mark.parametrize("document_id, reindexed", [(PROD_DOC, True), (None, False), ("Z" * 24, False)])
+async def test_release_webhook_marks_document_stale(server, tmp_path, name, document_id, reindexed):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    assert fake.index_calls == 1
+    event = {"event": name, "webhookId": "e" * 24, "partNumber": "PRT-000593", "elementType": 0}
+    if document_id:
+        event["documentId"] = document_id
+    secret = MappingStore(str(tmp_path / "mappings.db")).webhook_secret()
+    assert httpx.post(base + f"/onshape/webhook/{secret}", json=event).status_code == 200
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    assert fake.index_calls == (2 if reindexed else 1)
+
+
+@pytest.mark.parametrize("extra, reindexed", [
+    ({"documentId": "Z" * 24}, False), ({"documentId": "abc"}, False), ({"documentId": 42}, False),
+    ({}, True), ({"documentId": None}, True), ({"documentId": ""}, True),
+])
+async def test_metadata_webhook_invalid_document_marks_nothing(server, tmp_path, extra, reindexed):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    secret = MappingStore(str(tmp_path / "mappings.db")).webhook_secret()
+    event = {"event": "onshape.model.lifecycle.metadata", "webhookId": "e" * 24, **extra}
+    assert httpx.post(base + f"/onshape/webhook/{secret}", json=event).status_code == 200
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    assert fake.index_calls == (2 if reindexed else 1)  # no id: all documents (unchanged); malformed: none
+
+
+async def test_metadata_webhook_id_is_known(server, tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    httpx.post(base + "/admin/webhook", headers=h)
+    m = MappingStore(str(tmp_path / "mappings.db"))
+    meta_id = "7" * 24  # the fake hands out one id for every webhook
+    m.set_meta("webhook_meta_id", meta_id)
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    httpx.post(base + f"/onshape/webhook/{m.webhook_secret()}",
+               json={"event": "onshape.model.lifecycle.metadata", "webhookId": meta_id, "documentId": PROD_DOC})
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    assert fake.index_calls == 2
+
+
+def test_webhook_log_is_escaped(server, tmp_path, capfd):
+    from onshape_secure.mapping import MappingStore
+
+    base, _ = server(log_level="INFO")
+    hook = base + f"/onshape/webhook/{MappingStore(str(tmp_path / 'mappings.db')).webhook_secret()}"
+    forged = {"event": "x\n2026-01-01 AUDIT forged", "partNumber": "P\n2026-01-01 AUDIT forged"}
+    httpx.post(hook, json=forged)  # accepted path (not registered yet): INFO line
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    httpx.post(hook, json={**forged, "webhookId": "9" * 24})  # unknown webhook: WARNING line
+    out = "".join(capfd.readouterr())
+    assert "webhook event=" in out and "unknown webhook ignored" in out
+    assert "\n2026-01-01 AUDIT forged" not in out
 
 
 async def test_document_hint_indexes_named_document(server):

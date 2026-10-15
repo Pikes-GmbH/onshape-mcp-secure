@@ -17,10 +17,21 @@ current_client: contextvars.ContextVar[str] = contextvars.ContextVar("current_cl
 
 PUBLIC_PATHS = {"/healthz"}
 AUTH_FAIL_LOGS_PER_MINUTE = 20
+# path segment after these prefixes is a credential (webhook secret, link token): log only a prefix
+SECRET_PATH_PREFIXES = ("/onshape/webhook/", "/img/", "/dl/")
+SECRET_PREFIX_CHARS = 6
 
 
 def token_fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:8]
+
+
+def redact_path(path: str) -> str:
+    """Cut capability/secret paths to `<prefix><first 6 chars>...` (AD-10, AD-13)."""
+    for prefix in SECRET_PATH_PREFIXES:
+        if path.startswith(prefix):
+            return path[: len(prefix) + SECRET_PREFIX_CHARS] + "..."
+    return path
 
 
 class BearerAuthMiddleware:
@@ -65,7 +76,7 @@ class BearerAuthMiddleware:
         # json.dumps escapes newlines etc. -> no forged log lines
         logger.warning(
             "auth_failed path={} ip={}",
-            json.dumps(str(scope.get("path", ""))[:200]),
+            json.dumps(redact_path(str(scope.get("path", "")))[:200]),
             json.dumps(client_ip[:64]),
         )
 

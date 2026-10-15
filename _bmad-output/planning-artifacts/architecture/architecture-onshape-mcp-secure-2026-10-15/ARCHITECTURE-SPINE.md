@@ -245,11 +245,11 @@ docs/                 # Nutzer-Doku (Deutsch)
 | H-1 | Code-Defaults offen: `WRITE_MODE=allowlist`, `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT`, `ENABLE_LEGACY_SSE` = true; gesetztes `DISABLED_TOOLS` hebt Export-Sperre auf | AD-10, AD-5 |
 | H-2 | KV-Fallbacks für Teile-Daten in `_revision`, `_drawings_where_used`, `_locate_by_where_used` | AD-6, AD-12 |
 | H-3 | `put_revision` und `put_synced_revision` lösen `latest[pn,'']` unterschiedlich auf | AD-6 |
-| H-4 | `ping`/`register`-Events setzen `webhook_verified_at`; Events ohne `webhookId` werden akzeptiert; Release-Events markieren `ws_docs` nicht dirty | AD-7 |
+| H-4 | **Erledigt 2026-10-15** (war: `ping`/`register` setzten `webhook_verified_at`; Events ohne `webhookId` akzeptiert; Release-Events ohne `ws_docs`-dirty). Offen: Gate öffnet wieder, wenn der Webhook verschwindet (deferred-work.md); ob Release-Events `documentId` tragen, zeigt das Log-Feld `doc=yes/no` | AD-7 |
 | H-5 | `fetch_document_name` umgeht `check_onshape_request`; nur get/post/delete gewrappt | AD-3 |
 | H-6 | Admin-Audit als Freitext; Kosten mal als Requests, mal als billed; Sync-Cooldown nur im Prozess | AD-3, AD-8 |
 | H-7 | Server startet ohne beschreibbares `/data` (Caches/Mapping still aus) | AD-8 |
-| H-8 | `auth_failed` loggt vollständigen Pfad (Webhook-Geheimnis, Link-Token bei GET) | AD-10, AD-13 |
+| H-8 | **Erledigt 2026-10-15** (war: `auth_failed` loggte den vollen Pfad mit Webhook-Geheimnis/Link-Token; jetzt Präfix + 6 Zeichen, Access-Log explizit aus) | AD-10, AD-13 |
 | H-9 | `find_drawing_for_part` / `_find_unreleased` ohne `check_read`; Read-Scope über Namensliste statt Klasse `index` | AD-14 |
 | H-10 | Kein Test für Übereinstimmung der Tool-Registrierungslisten; doppelte Namen überschreiben still | AD-2, AD-11 |
 | H-11 | `/api/webhooks` ohne API-Version | Konvention Onshape-API-Pfade |

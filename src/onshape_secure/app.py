@@ -678,6 +678,7 @@ def main() -> None:
         server_header=False,
         ws="none",
         log_level="warning",
+        access_log=False,  # access lines would carry webhook secrets / link tokens (AD-10, AD-13)
     )
 
 

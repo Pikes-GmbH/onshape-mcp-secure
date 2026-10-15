@@ -361,3 +361,17 @@ def test_csv_export_neutralises_formulas():
     assert _csv_safe('=HYPERLINK("http://evil")') == "'=HYPERLINK(\"http://evil\")"
     assert [_csv_safe(v) for v in ("+1", "-1", "@SUM(A1)", "\tx")] == ["'+1", "'-1", "'@SUM(A1)", "'\tx"]
     assert _csv_safe("PRT-000593") == "PRT-000593" and _csv_safe(None) == ""
+
+
+@pytest.mark.parametrize("path, expected", [
+    ("/onshape/webhook/abcdefghijklmnop", "/onshape/webhook/abcdef..."),
+    ("/img/abcdefghijklmnop.png", "/img/abcdef..."),
+    ("/dl/abcdefghijklmnop/part.step", "/dl/abcdef..."),
+    ("/img/", "/img/..."),
+    ("/mcp", "/mcp"),
+    ("/imgx/abcdefghijklmnop", "/imgx/abcdefghijklmnop"),
+])
+def test_redact_path_keeps_only_secret_prefix(path, expected):
+    from onshape_secure.auth import redact_path
+
+    assert redact_path(path) == expected

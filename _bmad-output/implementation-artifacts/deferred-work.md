@@ -9,3 +9,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-h-4-h-8-webhook-trust-log-redaction.md`
   summary: Webhook-Route `/onshape/webhook/{secret}` hat kein Rate-Limit; mit geleaktem Geheimnis lassen sich wiederholt Invalidierungen/Re-Indexierungen auslösen.
   evidence: Vorbestehend; Schaden durch Tages-Budget-Cap begrenzt. Fix bräuchte Debounce/Rate-Limit pro Minute im Receiver.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-h-5-h-6-h-7-call-scope-data-dir.md`
+  summary: Fehlt der Volume-Mount auf Fly, ist das im Docker-Image angelegte `/data` trotzdem beschreibbar; der Server startet dann mit flüchtigem Budgetzähler und leerer Mapping-DB.
+  evidence: `Dockerfile` legt `/data` an und gibt es `mcp`; die H-7-Prüfung (Probe-Datei) erkennt nur „nicht beschreibbar“. Fix: Mount prüfen (z. B. `os.path.ismount` hinter einem Schalter wie `REQUIRE_DATA_MOUNT=true` in `fly.toml`) – braucht Erics OK für eine neue Variable.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-h-5-h-6-h-7-call-scope-data-dir.md`
+  summary: Ein kaputtes `usage.json` setzt den Budgetzähler beim Start still auf 0 (`OnshapeBudget._load` warnt nur), statt den Start zu verweigern.
+  evidence: Vorbestehend in `quota.py`; atomisches Schreiben macht den Fall selten. Fail-closed hieße: manuelles Reparieren vor jedem Start – Betriebsentscheidung für Eric (Code-Review Edge Case Hunter).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-h-5-h-6-h-7-call-scope-data-dir.md`
+  summary: Volles Volume (ENOSPC) lässt die H-7-Probe scheitern; der Server startet nicht, und das Aufräumen, das Platz schaffen würde, läuft erst nach dem Start.
+  evidence: `_check_data_dir` vor `_cleanup_files`; Datei-Cache ist auf 500 MB von 1 GB begrenzt, Bilder/Links nur per TTL – daher unwahrscheinlich. Fix: vor der Probe abgelaufene Dateien löschen oder ENOSPC gesondert melden (Code-Review Edge Case Hunter).

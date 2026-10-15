@@ -151,7 +151,7 @@ Nicht freigegebene Teile sind über die Onshape-API nicht per Teilenummer auffin
 |---|---|---|
 | `ONSHAPE_ACCESS_KEY` / `ONSHAPE_SECRET_KEY` | – | **Secret.** API-Key des Service-Accounts |
 | `MCP_AUTH_TOKENS` | – | **Secret.** `label:token,label2:token2` – Label erscheint im Audit-Log (Label `admin` ist reserviert) |
-| `ADMIN_TOKEN` | – | **Secret.** Eigenes Token nur für `/admin/*` (min. 32 Zeichen). Client-Tokens wie das von ClickUp erhalten dort 403; `/admin/sync` höchstens alle 10 Minuten |
+| `ADMIN_TOKEN` | – | **Secret.** Eigenes Token nur für `/admin/*` (min. 32 Zeichen). Client-Tokens wie das von ClickUp erhalten dort 403; `/admin/sync` höchstens alle 10 Minuten (auch über Neustarts) |
 | `WRITE_MODE` | `off` | `off` = nur lesen, `allowlist` = Präfix/IDs, `all` = überall (nicht empfohlen) |
 | `WRITE_ALLOWED_NAME_PREFIX` | `AI-` | Dokumente mit diesem Namensanfang sind beschreibbar; leer = aus |
 | `WRITE_ALLOWED_DOCUMENT_IDS` | leer | Zusätzlich beschreibbare Dokument-IDs (kommagetrennt) |
@@ -181,7 +181,8 @@ Die Rechte-Schalter (`WRITE_MODE`, `ALLOW_DELETE_FEATURE`, `ALLOW_FEATURESCRIPT`
 
 ## Betrieb
 
-- **Logs/Audit:** `fly logs` – jede Tool-Ausführung als `AUDIT {...}` mit Client-Label, Tool, Dokument, Entscheidung, Anzahl Onshape-Requests. Keine Secrets, keine CAD-Inhalte.
+- **Logs/Audit:** `fly logs` – jede Tool-Ausführung, Admin-Aktion (`/admin/*`) und jeder Hintergrundjob als eine JSON-Zeile `AUDIT {...}`: `event` (`tool_call`/`admin`/`job`), `client`, `action`, `cls`, `decision`, `document`, `onshapeCalls` (abgerechnete Calls), `attempts` (gesendete Requests inkl. Fehlern), `blocked` (vom Guard gestoppt), `ms`, je nach Fall `reason`, `error`, `onshapeStatus`, `upstream_error`. Keine Secrets, keine CAD-Inhalte. Seit 2026-10-15 (H-6) heißen die Felder so (vorher `tool`, `onshape_requests`, `blocked_requests`); `/admin/webhook` meldet `onshapeCalls` statt `onshapeRequests` – Log-Filter und Admin-Skripte entsprechend anpassen.
+- **Datenverzeichnis:** Ist das Verzeichnis von `USAGE_FILE` (`/data`) nicht beschreibbar oder lässt sich die Mapping-DB bzw. ein Cache nicht öffnen, startet der Server nicht (Exit 2, eine Zeile `Configuration error: …`). Der `/admin/sync`-Cooldown liegt in `mappings.db` und übersteht Neustarts.
 - **Token rotieren:** neues Token als zweites Label ergänzen (`clickup:NEU,clickup-alt:ALT`), in ClickUp umstellen, altes entfernen.
 - **Notaus:** `fly scale count 0` oder API-Key in Onshape löschen.
 - **Upstream-Update:** neuen Stand von hedless/onshape-mcp prüfen, nach `src/onshape_mcp/` kopieren, `pytest` ausführen. Neue Tools bleiben gesperrt, bis sie in `src/onshape_secure/policy.py` (`TOOL_CLASSES`) eingestuft sind – der Test `test_every_upstream_tool_is_classified` schlägt dann an.

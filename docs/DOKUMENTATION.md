@@ -128,7 +128,7 @@ Der Server läuft als eine Fly.io-Maschine in Frankfurt (App `pikes-onshape-mcp`
 
 **Geheimnisse (Fly-Dashboard → App → Secrets):** `ONSHAPE_ACCESS_KEY`, `ONSHAPE_SECRET_KEY`, `MCP_AUTH_TOKENS`, `ADMIN_TOKEN`. Sie stehen nie im Code oder in `fly.toml`.
 
-**Admin-Endpunkte (nur mit dem separaten Admin-Token `ADMIN_TOKEN`; das ClickUp-Token wird abgelehnt, `/admin/sync` höchstens alle 10 Minuten):**
+**Admin-Endpunkte (nur mit dem separaten Admin-Token `ADMIN_TOKEN`; das ClickUp-Token wird abgelehnt, `/admin/sync` höchstens alle 10 Minuten, auch über Neustarts hinweg):**
 
 | Aufruf | Zweck | Onshape-Aufrufe |
 | --- | --- | --- |
@@ -143,7 +143,8 @@ Der Server läuft als eine Fly.io-Maschine in Frankfurt (App `pikes-onshape-mcp`
 - **Schreiben ein- oder ausschalten:** in `fly.toml` `WRITE_MODE` auf `off` oder `allowlist` setzen, dann neu deployen.
 - **Token tauschen:** neues Token erzeugen (`openssl rand -hex 32`), in `MCP_AUTH_TOKENS` eintragen, in ClickUp neu verbinden.
 - **Notaus:** `fly scale count 0` oder den API-Key in Onshape löschen.
-- **Logs:** `fly logs`. Jede Tool-Ausführung steht dort als `AUDIT`-Zeile mit Tool, Dokument und Anzahl der Onshape-Aufrufe.
+- **Logs:** `fly logs`. Jede Tool-Ausführung, Admin-Aktion und jeder Hintergrundjob steht dort als JSON-`AUDIT`-Zeile mit Aktion, Dokument, Entscheidung und den abgerechneten Onshape-Aufrufen (`onshapeCalls`; `attempts` zählt auch fehlgeschlagene).
+- **Startet nicht?** Ist `/data` nicht beschreibbar oder die Mapping-Tabelle kaputt, verweigert der Server den Start (`Configuration error` im Log), statt ohne Budgetzähler und Tabelle zu laufen.
 - **Update des Originalprojekts:** neuen Stand prüfen, nach `src/onshape_mcp/` kopieren, Tests laufen lassen. Neue Tools bleiben gesperrt, bis sie in `policy.py` eingestuft sind.
 
 **Kosten bei Fly.io:** eine kleine Maschine mit Auto-Stop und 1 GB Volume. Den genauen Betrag zeigt das Fly-Dashboard.
@@ -175,7 +176,7 @@ Alle Einstellungen kommen aus Umgebungsvariablen. Geheimnisse liegen als Fly-Sec
 | `FILE_CACHE_HOURS` | 24 | STEP, PDF und Renderings werden danach gelöscht |
 | `CACHE_MAX_MB` | 500 | Obergrenze Datei-Cache |
 | `PUBLIC_BASE_URL` | automatisch (Fly-App) | Basis-URL für Links |
-| `USAGE_FILE` | `/data/usage.json` | Zählerstand des Budgets |
+| `USAGE_FILE` | `/data/usage.json` | Zählerstand des Budgets; sein Verzeichnis ist das Datenverzeichnis und muss beschreibbar sein |
 | `ONSHAPE_BASE_URL` | cad.onshape.com | nur `*.onshape.com` zulässig |
 | `ALLOWED_HOSTS` | leer | optionale Host-Header-Prüfung |
 | `ENABLE_LEGACY_SSE` | true (Standard: false) | alter SSE-Transport zusätzlich zu `/mcp` |

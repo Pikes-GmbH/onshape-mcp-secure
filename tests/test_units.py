@@ -1,4 +1,5 @@
 import asyncio
+import os
 import inspect
 import json
 import re
@@ -486,3 +487,149 @@ def test_known_disabled_tools_start(tmp_path):
 
     create_app(make_settings(tmp_path, disabled_tools=frozenset(cfg.DEFAULT_DISABLED_TOOLS) | {"get_document",
                                                                                                 "show_mapping_table"}))
+
+
+# --- H-5/H-6/H-7: one call scope for every Onshape request, fail-closed data directory ---
+
+
+def test_every_public_upstream_client_method_is_metered(settings):
+    from onshape_mcp import server as upstream
+
+    from onshape_secure import app as app_mod
+
+    app_mod.create_app(settings)
+    cls = type(upstream.client)
+    public = [n for n in dir(cls) if not n.startswith("_") and callable(getattr(cls, n))]
+    for name in public:
+        if name not in app_mod.CLIENT_NON_REQUEST_METHODS:
+            assert getattr(getattr(upstream.client, name), "secure_metered", False), name
+    assert {"get", "post", "delete"} <= set(public)
+
+
+def test_new_upstream_client_method_stops_startup(monkeypatch, settings):
+    from onshape_mcp.api.client import OnshapeClient
+
+    from onshape_secure import app as app_mod
+
+    async def get_raw(self, path):  # a new upstream helper that would bypass guard and budget
+        return {}
+
+    monkeypatch.setattr(OnshapeClient, "get_raw", get_raw, raising=False)
+    with pytest.raises(RuntimeError, match="not covered by the call scope: get_raw"):
+        app_mod.create_app(settings)
+
+
+def test_new_upstream_http_verb_is_metered(monkeypatch, settings):
+    from onshape_mcp import server as upstream
+    from onshape_mcp.api.client import OnshapeClient
+
+    from onshape_secure import app as app_mod
+
+    async def put(self, path, data=None):
+        return {}
+
+    monkeypatch.setattr(OnshapeClient, "put", put, raising=False)
+    app_mod.create_app(settings)
+    try:
+        assert upstream.client.put.secure_metered
+    finally:
+        del upstream.client.put  # the wrapper lives on the shared singleton
+
+
+async def test_onshape_request_outside_call_scope_is_refused(settings, monkeypatch):
+    import httpx
+    from onshape_mcp import server as upstream
+
+    from onshape_secure import app as app_mod
+
+    sent = []
+    app_mod.create_app(settings)
+    monkeypatch.setattr(upstream.client, "_client", httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: sent.append(r) or httpx.Response(200, json={}))))
+    with pytest.raises(PolicyDenied, match="outside a call scope"):
+        await upstream.client.get("/api/v6/documents/" + "a" * 24)
+    assert sent == []
+    assert not os.path.exists(settings.usage_file)  # no budget unit reserved
+
+
+@pytest.mark.parametrize("make_path", [
+    lambda tmp: tmp / "missing" / "usage.json",  # directory does not exist
+    lambda tmp: tmp / "file.txt" / "usage.json",  # "directory" is a file
+])
+def test_unusable_data_dir_stops_startup(tmp_path, make_path):
+    from onshape_secure import app as app_mod
+
+    (tmp_path / "file.txt").write_text("x")
+    settings = make_settings(tmp_path, usage_file=str(make_path(tmp_path)))
+    with pytest.raises(app_mod.DataDirError, match="not writable"):
+        app_mod.create_app(settings)
+
+
+def test_data_dir_error_is_a_config_error():
+    from onshape_secure import app as app_mod
+
+    assert issubclass(app_mod.DataDirError, cfg.ConfigError)
+
+
+def test_broken_mapping_db_stops_startup(tmp_path):
+    from onshape_secure import app as app_mod
+
+    (tmp_path / "mappings.db").write_bytes(b"this is not a sqlite database" * 100)
+    with pytest.raises(app_mod.DataDirError, match="mapping table"):
+        app_mod.create_app(make_settings(tmp_path))
+
+
+def test_unopenable_image_store_stops_startup(tmp_path):
+    from onshape_secure import app as app_mod
+
+    (tmp_path / "blocker").write_text("x")
+    settings = make_settings(tmp_path, image_links=True, public_base_url="https://x.example",
+                             image_dir=str(tmp_path / "blocker" / "images"))
+    with pytest.raises(app_mod.DataDirError, match="image store"):
+        app_mod.create_app(settings)
+
+
+def test_main_exits_2_when_data_dir_unusable(monkeypatch, tmp_path, capsys):
+    from onshape_secure import app as app_mod
+
+    settings = make_settings(tmp_path, usage_file=str(tmp_path / "missing" / "usage.json"))
+    monkeypatch.setattr(app_mod, "load_settings", lambda: settings)
+    with pytest.raises(SystemExit) as exc:
+        app_mod.main()
+    assert exc.value.code == 2
+    assert "not writable" in capsys.readouterr().err
+
+
+def test_writable_data_dir_starts_and_leaves_no_probe(tmp_path):
+    from onshape_secure import app as app_mod
+
+    app_mod.create_app(make_settings(tmp_path))
+    assert not [p for p in os.listdir(tmp_path) if p.startswith(".write-probe")]
+    assert (tmp_path / "mappings.db").exists()
+
+
+def test_audit_lines_only_come_from_audit():
+    import pathlib
+
+    from onshape_secure import app as app_mod
+
+    src = pathlib.Path(app_mod.__file__).parent
+    hits = [f"{p.name}:{i}" for p in src.glob("*.py") for i, line in enumerate(p.read_text("utf-8").splitlines(), 1)
+            if "AUDIT" in line]
+    assert len(hits) == 1, hits  # the logger call inside _audit
+    assert 'logger.info("AUDIT " + json.dumps(' in inspect.getsource(app_mod._audit)
+
+
+def test_nothing_reaches_onshape_around_the_client_methods():
+    """AD-3: only the upstream client itself and get_bytes (via _send) touch the raw httpx client or sign requests."""
+    import pathlib
+
+    root = pathlib.Path(__file__).parent.parent / "src"
+    raw = re.compile(r"\._client\b|_get_auth_header|httpx\.(Async)?Client\(")
+    hits = [(p.relative_to(root).as_posix(), line.strip()) for p in root.rglob("*.py")
+            for line in p.read_text("utf-8").splitlines() if raw.search(line)]
+    outside = [h for h in hits if h[0] not in ("onshape_mcp/api/client.py", "onshape_secure/app.py")]
+    assert outside == []
+    app_src = (root / "onshape_secure/app.py").read_text("utf-8")
+    get_bytes = app_src[app_src.index("    async def get_bytes("):app_src.index('return await _send("get", path, download)')]
+    assert [line for f, line in hits if f == "onshape_secure/app.py" and line not in get_bytes] == []

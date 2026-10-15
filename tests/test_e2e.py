@@ -1153,3 +1153,189 @@ async def test_read_scope_skips_stale_documents_outside_scope(server, tmp_path):
     result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000584"})
     assert result.isError and "STOP" in _text(result) and "Read access" not in _text(result)
     assert fake.index_calls == 0
+
+
+# --- H-5/H-6: one call scope, JSON audit everywhere, billed calls, persisted sync cooldown ---
+
+
+def _audits(out: str) -> list[dict]:
+    lines = [line for line in out.splitlines() if "AUDIT" in line]
+    return [json.loads(line.split("AUDIT ", 1)[1]) for line in lines]  # every AUDIT line is JSON
+
+
+def _usage_calls(result) -> int:
+    return int(re.search(r"\[Onshape-API: (\d+) Aufruf", _text(result)).group(1))
+
+
+def _day_count(tmp_path) -> int:
+    return json.loads((tmp_path / "usage.json").read_text())["day_count"]
+
+
+async def test_document_name_lookup_is_guarded_and_metered(server, tmp_path, capfd):
+    base, fake = server(log_level="INFO")
+    args = {"documentId": AI_DOC, "workspaceId": WS, "elementId": EL, "featureId": "Fabc_1"}
+    result = await _call(base, "delete_feature", args)  # check_write looks up the document name
+    assert not result.isError, _text(result)
+    assert ("GET", f"/api/v6/documents/{AI_DOC}", None) in fake.requests
+    audit = [a for a in _audits(capfd.readouterr().err) if a["action"] == "delete_feature"][0]
+    assert audit["event"] == "tool_call" and audit["decision"] == "allowed"
+    assert audit["onshapeCalls"] == audit["attempts"] == len(fake.requests) == _usage_calls(result)
+    assert _day_count(tmp_path) == len(fake.requests)
+
+
+async def test_failed_request_is_an_attempt_not_a_billed_call(server, tmp_path, capfd):
+    base, fake = server(log_level="INFO")
+    result = await _call(base, "get_document", {"documentId": "9" * 24})  # Onshape answers 404
+    assert len(fake.requests) == 1
+    audit = [a for a in _audits(capfd.readouterr().err) if a["action"] == "get_document"][0]
+    assert audit["attempts"] == 1 and audit["onshapeCalls"] == 0 == _usage_calls(result)
+    assert _day_count(tmp_path) == 0  # refunded
+
+
+def test_admin_actions_write_json_audit_with_billed_calls(server, capfd):
+    base, fake = server(log_level="INFO")
+    admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    assert httpx.post(base + "/admin/sync", headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 403
+    hook = httpx.post(base + "/admin/webhook", headers=admin).json()
+    assert hook["onshapeCalls"] == len(fake.requests) == 2 and "onshapeRequests" not in hook  # companies + POST
+    n = len(fake.requests)
+    sync = httpx.post(base + "/admin/sync", headers=admin, timeout=30).json()
+    assert sync["onshapeCalls"] == len(fake.requests) - n
+    assert httpx.post(base + "/admin/sync", headers=admin).status_code == 429
+    audits = [a for a in _audits(capfd.readouterr().err) if a["event"] == "admin"]
+    seen = [(a["action"], a["decision"], a.get("reason"), a["client"]) for a in audits]
+    assert seen == [
+        ("admin_sync", "denied", "admin token required", "clickup"),
+        ("admin_webhook", "allowed", None, "admin"),
+        ("admin_sync", "allowed", None, "admin"),
+        ("admin_sync", "denied", "cooldown", "admin"),
+    ]
+    assert audits[1]["onshapeCalls"] == 2 and audits[1]["cls"] == "system"
+    assert audits[2]["onshapeCalls"] == sync["onshapeCalls"] and audits[3]["onshapeCalls"] == 0
+
+
+def test_sync_cooldown_survives_restart(server):
+    admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    base, _ = server()
+    assert httpx.post(base + "/admin/sync", headers=admin, timeout=30).status_code == 200
+    base, fake = server()  # new process state, same data directory (auto-stop restart)
+    second = httpx.post(base + "/admin/sync", headers=admin)
+    assert second.status_code == 429 and "cooldown" in second.json()["error"]
+    assert fake.requests == []
+
+
+def test_sync_cooldown_ignores_start_time_in_the_future(server, tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    MappingStore(str(tmp_path / "mappings.db")).set_meta("admin_sync_last", str(time.time() + 86400))
+    base, _ = server()
+    assert httpx.post(base + "/admin/sync", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+                      timeout=30).status_code == 200
+
+
+async def test_webhook_check_job_has_own_audit_and_shows_in_usage_line(server, tmp_path, capfd):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server(log_level="INFO")
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    MappingStore(str(tmp_path / "mappings.db")).set_meta("webhook_verified_at", str(time.time() - 8 * 86400))
+    n = len(fake.requests)
+    result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
+    assert ("GET", "/api/webhooks/" + "e" * 24, None) in fake.requests[n:]
+    audits = _audits(capfd.readouterr().err)
+    job = [a for a in audits if a["event"] == "job"]
+    tool = [a for a in audits if a["action"] == "find_part_by_number"][0]
+    assert len(job) == 1 and job[0]["action"] == "verify_webhook" and job[0]["onshapeCalls"] == 1
+    assert tool["onshapeCalls"] + 1 == len(fake.requests) - n == _usage_calls(result)
+
+
+def _intercept(fake, rule):
+    """Route Onshape traffic through `rule(request)` first; None falls through to the fake."""
+    from onshape_mcp import server as upstream
+
+    def handler(request):
+        answer = rule(request)
+        if answer is None:
+            return fake(request)
+        fake.requests.append((request.method, request.url.path, None))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    upstream.client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_export_download_is_metered(server, tmp_path, capfd):
+    base, fake = server(log_level="INFO")
+    result = await _call(base, "export_released_model", {"partNumber": "PRT-000593"})
+    assert not result.isError, _text(result)
+    assert fake.requests[-1][1].endswith("/externaldata/extstep")  # the get_bytes download
+    audit = [a for a in _audits(capfd.readouterr().err) if a["action"] == "export_released_model"][0]
+    assert audit["onshapeCalls"] == audit["attempts"] == len(fake.requests) == _usage_calls(result) == 5
+    assert _day_count(tmp_path) == 5
+
+
+async def test_failed_download_and_transport_error_are_refunded(server, tmp_path, capfd):
+    base, fake = server(log_level="INFO")
+    _intercept(fake, lambda r: httpx.Response(404) if "/externaldata/" in r.url.path else None)
+    failed = await _call(base, "export_released_model", {"partNumber": "PRT-000593"})
+    assert failed.isError
+    _intercept(fake, lambda r: httpx.ConnectError("down", request=r))
+    down = await _call(base, "get_document", {"documentId": PROD_DOC})
+    assert down.isError
+    audits = {a["action"]: a for a in _audits(capfd.readouterr().err)}
+    export, doc = audits["export_released_model"], audits["get_document"]
+    assert export["attempts"] == 5 and export["onshapeCalls"] == 4 == _usage_calls(failed)
+    assert doc["attempts"] == 1 and doc["onshapeCalls"] == 0 == _usage_calls(down)
+    assert _day_count(tmp_path) == 4
+
+
+async def test_vanished_webhook_job_audits_error_and_falls_back(server, tmp_path, capfd):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server(log_level="INFO")
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    m = MappingStore(str(tmp_path / "mappings.db"))
+    m.set_meta("webhook_verified_at", str(time.time() - 8 * 86400))
+    _intercept(fake, lambda r: httpx.Response(404) if r.url.path == "/api/webhooks/" + "e" * 24 else None)
+    result = await _call(base, "find_part_by_number", {"partNumber": "PRT-000593"})
+    assert not result.isError, _text(result)  # the job never fails the tool call
+    job = [a for a in _audits(capfd.readouterr().err) if a["event"] == "job"]
+    assert len(job) == 1 and job[0]["decision"] == "error" and job[0]["onshapeStatus"] == 404
+    assert job[0]["attempts"] == 1 and job[0]["onshapeCalls"] == 0
+    assert m.meta("webhook_id") is None  # timed re-checks again
+
+
+@pytest.mark.parametrize("answer, error", [
+    (httpx.Response(200, json={"id": "not-an-id"}), "Onshape did not return a webhook id"),
+    (httpx.Response(500, json={}), "registration failed"),
+])
+def test_webhook_registration_failures_are_audited(server, capfd, answer, error):
+    base, fake = server(log_level="INFO")
+    _intercept(fake, lambda r: answer if r.url.path == "/api/webhooks" else None)
+    resp = httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    assert resp.status_code == 502 and resp.json()["error"] == error
+    audit = [a for a in _audits(capfd.readouterr().err) if a["action"] == "admin_webhook"][0]
+    assert audit["decision"] == "error"
+
+
+@pytest.mark.parametrize("overrides, rule, status, decision", [
+    ({"onshape_daily_limit": 1}, lambda r: None, 429, "denied"),  # budget runs out mid-sync
+    ({}, lambda r: httpx.Response(500) if r.url.path.startswith("/api/revisions/") else None, 502, "error"),
+])
+def test_admin_sync_failures_are_audited(server, capfd, overrides, rule, status, decision):
+    base, fake = server(log_level="INFO", **overrides)
+    _intercept(fake, rule)
+    resp = httpx.post(base + "/admin/sync", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}, timeout=30)
+    assert resp.status_code == status and "onshapeCalls" in resp.json()
+    audit = [a for a in _audits(capfd.readouterr().err) if a["action"] == "admin_sync"][0]
+    assert audit["decision"] == decision and audit["onshapeCalls"] == resp.json()["onshapeCalls"]
+
+
+def test_admin_sync_bad_requests_are_audited(server, capfd):
+    base, fake = server(log_level="INFO")
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    assert httpx.post(base + "/admin/sync?maxParts=abc", headers=h).status_code == 400
+    assert httpx.post(base + "/admin/sync?maxParts=5&document=Nope", headers=h, timeout=30).status_code == 400
+    reasons = [a.get("reason") for a in _audits(capfd.readouterr().err) if a["action"] == "admin_sync"]
+    assert reasons == ["bad maxParts", "unknown document"]

@@ -246,9 +246,9 @@ docs/                 # Nutzer-Doku (Deutsch)
 | H-2 | KV-Fallbacks für Teile-Daten in `_revision`, `_drawings_where_used`, `_locate_by_where_used` | AD-6, AD-12 |
 | H-3 | `put_revision` und `put_synced_revision` lösen `latest[pn,'']` unterschiedlich auf | AD-6 |
 | H-4 | **Erledigt 2026-10-15** (war: `ping`/`register` setzten `webhook_verified_at`; Events ohne `webhookId` akzeptiert; Release-Events ohne `ws_docs`-dirty). Offen: Gate öffnet wieder, wenn der Webhook verschwindet (deferred-work.md); ob Release-Events `documentId` tragen, zeigt das Log-Feld `doc=yes/no` | AD-7 |
-| H-5 | `fetch_document_name` umgeht `check_onshape_request`; nur get/post/delete gewrappt | AD-3 |
-| H-6 | Admin-Audit als Freitext; Kosten mal als Requests, mal als billed; Sync-Cooldown nur im Prozess | AD-3, AD-8 |
-| H-7 | Server startet ohne beschreibbares `/data` (Caches/Mapping still aus) | AD-8 |
+| H-5 | **Erledigt 2026-10-15** (war: `fetch_document_name` umging `check_onshape_request`; nur get/post/delete gewrappt). Jetzt: ein `_send` für alle Verben, `get_bytes` und Namens-Lookup; Request ohne Call-Scope wird abgelehnt; unbekannte öffentliche Upstream-Client-Methode stoppt den Start | AD-3 |
+| H-6 | **Erledigt 2026-10-15** (war: Admin-Audit als Freitext; Kosten mal als Requests, mal als billed; Sync-Cooldown nur im Prozess). Jetzt: `_call_scope` für Tools, Admin und Webhook-Check-Job mit einer JSON-`AUDIT`-Zeile (`onshapeCalls` + `attempts`); Cooldown in `mappings.db` `meta` | AD-3, AD-8 |
+| H-7 | **Erledigt 2026-10-15** (war: Server startete ohne beschreibbares `/data`, Caches/Mapping still aus). Offen: fehlt der Volume-Mount, ist das im Image angelegte `/data` trotzdem beschreibbar (deferred-work.md) | AD-8 |
 | H-8 | **Erledigt 2026-10-15** (war: `auth_failed` loggte den vollen Pfad mit Webhook-Geheimnis/Link-Token; jetzt Präfix + 6 Zeichen, Access-Log explizit aus) | AD-10, AD-13 |
 | H-9 | **Erledigt 2026-10-15** (war: `find_drawing_for_part` / `_find_unreleased` ohne `check_read`; Read-Scope über Namensliste statt Klasse `index`) | AD-14 |
 | H-10 | **Erledigt 2026-10-15** (war: kein Test für Übereinstimmung der Tool-Registrierungslisten; doppelte Namen überschrieben still) | AD-2, AD-11 |

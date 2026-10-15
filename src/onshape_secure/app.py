@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import types
 from typing import Any
 
 import anyio
@@ -56,13 +57,21 @@ from .webhooks import make_receiver
 from .quota import OnshapeBudget, QuotaExceeded, RateLimiter
 
 ADMIN_SYNC_COOLDOWN = 600  # seconds between two /admin/sync runs
+SYNC_COOLDOWN_KEY = "admin_sync_last"  # mappings.db meta: survives auto-stop restarts (AD-8)
 
 TOOL_TIMEOUT_SECONDS = 180
 POLICY_TOOL = "get_server_policy"
 SEMAPHORE_WAIT_SECONDS = 30
 MAX_SSE_SESSIONS = 10
-# per tool call: {"cls": tool class, "doc": gated documentId, "requests": int, "blocked": int}
+# upstream client methods that send a request (wrapped when present) and public methods that don't
+CLIENT_REQUEST_METHODS = ("get", "post", "put", "patch", "delete")
+CLIENT_NON_REQUEST_METHODS = frozenset({"close"})
+# the open call scope (AD-3): {"cls": class, "doc": gated documentId, "attempts", "billed", "blocked", ...}
 _call_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar("call_ctx", default=None)
+
+
+class DataDirError(ConfigError):
+    """The data directory (/data) or a store on it cannot be used - the server must not start (AD-8)."""
 
 
 def _configure_logging(level: str) -> None:
@@ -78,9 +87,79 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _audit(**fields: Any) -> None:
-    fields = {"event": "tool_call", **fields}
+def _audit(event: str, **fields: Any) -> None:
+    """The only audit log format: one JSON line per tool call, admin action and job (AD-3)."""
+    fields = {"event": event, "client": current_client.get(), **fields}
     logger.info("AUDIT " + json.dumps(fields, ensure_ascii=False, default=str))
+
+
+@contextlib.contextmanager
+def _call_scope(event: str, action: str, cls: str, document: str | None = None):
+    """One call scope (actor, action, class, document) per tool call, admin action or job.
+
+    Every Onshape request needs an open scope; on exit exactly one audit line is written.
+    Callers set ctx["decision"] and add audit fields to ctx["audit"]. A nested scope (a job
+    inside a tool call) audits itself; its billed calls also show in the outer usage line.
+    """
+    ctx = {"cls": cls, "doc": None, "attempts": 0, "billed": 0, "blocked": 0, "nested_billed": 0,
+           "decision": "allowed", "audit": {}}
+    parent = _call_ctx.get()
+    token = _call_ctx.set(ctx)
+    started = time.monotonic()
+    try:
+        yield ctx
+    except BaseException:
+        if ctx["decision"] == "allowed":
+            ctx["decision"] = "error"
+        raise
+    finally:
+        _call_ctx.reset(token)
+        if parent is not None:
+            parent["nested_billed"] += ctx["billed"] + ctx["nested_billed"]
+        _audit(event, **{
+            **ctx["audit"],  # extras first: they can never replace the fixed fields
+            "action": action[:80],
+            "cls": cls,
+            "decision": ctx["decision"],
+            "document": document[:64] if isinstance(document, str) else None,
+            "onshapeCalls": ctx["billed"],
+            "attempts": ctx["attempts"],
+            "blocked": ctx["blocked"] or None,
+            "ms": int((time.monotonic() - started) * 1000),
+        })
+
+
+def _check_client_methods(client_cls: type) -> list[str]:
+    """Request methods to wrap; any other public upstream client method stops the start (AD-3)."""
+    public = sorted(n for n in dir(client_cls) if not n.startswith("_") and callable(getattr(client_cls, n)))
+    unknown = [n for n in public if n not in CLIENT_REQUEST_METHODS and n not in CLIENT_NON_REQUEST_METHODS]
+    if unknown:
+        raise RuntimeError(
+            f"upstream client method(s) not covered by the call scope: {', '.join(unknown)} - "
+            "add them to CLIENT_REQUEST_METHODS (wrapped) or CLIENT_NON_REQUEST_METHODS"
+        )
+    return [n for n in public if n in CLIENT_REQUEST_METHODS]
+
+
+def _check_data_dir(settings: Settings) -> str:
+    """The data directory must be writable, otherwise budget and mapping would silently vanish (AD-8)."""
+    data_dir = os.path.dirname(settings.usage_file) or "."
+    probe = os.path.join(data_dir, f".write-probe-{os.getpid()}")
+    try:
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        os.remove(probe)
+    except OSError as exc:
+        reason = exc.strerror or type(exc).__name__
+        raise DataDirError(f"data directory {data_dir!r} is not writable: {reason}") from None
+    return data_dir
+
+
+def _open_store(what: str, factory):
+    try:
+        return factory()
+    except Exception as exc:  # noqa: BLE001 - a store that cannot open stops the start
+        raise DataDirError(f"cannot open {what}: {type(exc).__name__}: {exc}") from None
 
 
 DESCRIPTION_HINTS = {
@@ -158,6 +237,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or load_settings()
     _configure_logging(settings.log_level)
     _check_tool_registry(settings)
+    data_dir = _check_data_dir(settings)
 
     # Import the upstream tool implementation only after the configuration is validated.
     from onshape_mcp import server as upstream
@@ -181,7 +261,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
             return f"{label} {used}/{limit}" if limit != "unlimited" else f"{label} {used}"
 
         return TextContent(type="text", text=(
-            f"[Onshape-API: {ctx.get('billed', 0)} Aufruf(e) für diese Anfrage · "
+            f"[Onshape-API: {ctx['billed'] + ctx['nested_billed']} Aufruf(e) für diese Anfrage · "
             + " · ".join([
                 part("heute", b["today_utc"], b["daily_limit"]),
                 part("Woche", b["this_week_utc"], b["weekly_limit"]),
@@ -190,67 +270,58 @@ def create_app(settings: Settings | None = None) -> Starlette:
             ]) + "]"
         ))
 
-    async def _billed(call):
-        """Run one Onshape request; refund the budget unit if Onshape doesn't bill it (error answer)."""
+    limiter = RateLimiter(settings.tool_calls_per_minute)
+    semaphore = asyncio.Semaphore(settings.max_concurrent_calls)
+
+    async def _send(method_name: str, path: str, call):
+        """The only way to Onshape: open call scope, HTTP guard, budget reserve, refund if unbilled (AD-3)."""
         ctx = _call_ctx.get()
-        if ctx is not None:
-            ctx["billed"] = ctx.get("billed", 0) + 1
+        if ctx is None:
+            logger.warning(f"blocked {method_name.upper()} outside a call scope")
+            raise PolicyDenied("Onshape request outside a call scope.")
+        try:
+            check_onshape_request(method_name, str(path), ctx["cls"], ctx["doc"])
+        except PolicyDenied:
+            ctx["blocked"] += 1
+            logger.warning(f"blocked {method_name.upper()} outside tool permission (tool class {ctx['cls']})")
+            raise
+        await budget.reserve()
+        ctx["attempts"] += 1
+        ctx["billed"] += 1
         try:
             return await call()
         except (httpx.HTTPStatusError, httpx.TransportError) as exc:
             if isinstance(exc, httpx.TransportError) or exc.response.status_code >= 400:
-                await budget.refund()
-                if ctx is not None:
-                    ctx["billed"] -= 1
+                await budget.refund()  # Onshape doesn't bill error answers
+                ctx["billed"] -= 1
             raise
-    limiter = RateLimiter(settings.tool_calls_per_minute)
-    semaphore = asyncio.Semaphore(settings.max_concurrent_calls)
 
-    # Every Onshape HTTP request goes through the shared upstream client: guard and meter it.
     def _metered(method_name, method):
         async def wrapper(path, *args, **kwargs):
-            ctx = _call_ctx.get()
-            try:
-                check_onshape_request(method_name, str(path), ctx and ctx["cls"], ctx and ctx["doc"])
-            except PolicyDenied:
-                if ctx is not None:
-                    ctx["blocked"] += 1
-                logger.warning(f"blocked {method_name.upper()} outside tool permission (tool class {ctx and ctx['cls']})")
-                raise
-            await budget.reserve()
-            if ctx is not None:
-                ctx["requests"] += 1
-            return await _billed(lambda: method(path, *args, **kwargs))
+            return await _send(method_name, path, lambda: method(path, *args, **kwargs))
 
+        wrapper.secure_metered = True
         return wrapper
 
-    originals = getattr(upstream, "_secure_original_methods", None)
-    if originals is None:  # keep the unwrapped methods so create_app() can run more than once
-        originals = {m: getattr(upstream.client, m) for m in ("get", "post", "delete")}
-        upstream._secure_original_methods = originals
-    for method_name, method in originals.items():
-        setattr(upstream.client, method_name, _metered(method_name, method))
-    raw_get = originals["get"]
+    # Every Onshape HTTP request goes through the shared upstream client: meter each request
+    # method; any other public method stops the start, so new upstream methods can't bypass it.
+    client_cls = type(upstream.client)
+    for method_name in _check_client_methods(client_cls):
+        # bind the class function, never an already wrapped attribute (create_app may run twice)
+        original = types.MethodType(getattr(client_cls, method_name), upstream.client)
+        setattr(upstream.client, method_name, _metered(method_name, original))
 
     async def fetch_document_name(document_id: str) -> str:
-        await budget.reserve()
-        ctx = _call_ctx.get()
-        if ctx is not None:
-            ctx["requests"] += 1
-        data = await _billed(lambda: raw_get(f"/api/v6/documents/{document_id}"))
+        data = await upstream.client.get(f"/api/v6/documents/{document_id}")
         return str(data.get("name", ""))
 
     async def get_bytes(path: str, max_bytes: int) -> bytes:
         """Binary GET (file downloads) through the same guard + budget as every other request."""
-        ctx = _call_ctx.get()
-        check_onshape_request("get", path, ctx and ctx["cls"], ctx and ctx["doc"])
-        await budget.reserve()
-        if ctx is not None:
-            ctx["requests"] += 1
         client = upstream.client
-        client._ensure_client()
-        headers = {"Authorization": client._get_auth_header(), "Accept": "application/octet-stream"}
+
         async def download() -> bytes:
+            client._ensure_client()
+            headers = {"Authorization": client._get_auth_header(), "Accept": "application/octet-stream"}
             chunks, size = [], 0
             # httpx drops the Authorization header on cross-origin redirects
             async with client._client.stream(
@@ -264,36 +335,26 @@ def create_app(settings: Settings | None = None) -> Starlette:
                     chunks.append(chunk)
             return b"".join(chunks)
 
-        return await _billed(download)
+        return await _send("get", path, download)
 
     access = DocumentAccess(settings, fetch_document_name)
 
-    data_dir = os.path.dirname(settings.usage_file) or "."
+    # Stores on the data directory: if one cannot open, the server does not start (AD-8).
     images: ImageStore | None = None
     links: DownloadLinks | None = None
-    kv: KVCache | None = None
-    files: FileCache | None = None
-    try:
-        kv = KVCache(os.path.join(data_dir, "cache.json"))
-        files = FileCache(
-            os.path.join(data_dir, "files"), settings.cache_max_mb * 1024 * 1024, settings.file_cache_hours * 3600
-        )
-    except OSError as exc:
-        logger.warning(f"Persistent cache disabled ({exc})")
+    kv = _open_store("KV cache", lambda: KVCache(os.path.join(data_dir, "cache.json")))
+    files = _open_store("file cache", lambda: FileCache(
+        os.path.join(data_dir, "files"), settings.cache_max_mb * 1024 * 1024, settings.file_cache_hours * 3600
+    ))
     if settings.image_links and settings.public_base_url:
         image_dir = settings.image_dir or os.path.join(data_dir, "images")
-        try:
-            images = ImageStore(image_dir, settings.image_ttl_hours * 3600, settings.public_base_url)
-            links = DownloadLinks(
-                os.path.join(data_dir, "links"), settings.image_ttl_hours * 3600, settings.public_base_url
-            )
-        except OSError as exc:
-            logger.warning(f"Image/download links disabled, cannot use {data_dir!r}: {exc}")
-    mapping: MappingStore | None = None
-    try:
-        mapping = MappingStore(os.path.join(data_dir, "mappings.db"))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Mapping table disabled ({exc})")
+        images = _open_store("image store", lambda: ImageStore(
+            image_dir, settings.image_ttl_hours * 3600, settings.public_base_url
+        ))
+        links = _open_store("download links", lambda: DownloadLinks(
+            os.path.join(data_dir, "links"), settings.image_ttl_hours * 3600, settings.public_base_url
+        ))
+    mapping = _open_store("mapping table", lambda: MappingStore(os.path.join(data_dir, "mappings.db")))
     extra = ExtraTools(
         upstream.client, access.check_read, get_bytes=get_bytes, kv=kv, files=files, links=links, mapping=mapping,
         web_base_url=settings.onshape_base_url,
@@ -301,20 +362,24 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
     async def _verify_webhook_if_due() -> None:
         """At most weekly: is Onshape still delivering release events? (1 GET, only when a tool runs)."""
-        if mapping is None or not mapping.meta("webhook_id"):
+        if not mapping.meta("webhook_id"):
             return
         verified = float(mapping.meta("webhook_verified_at") or 0)
         if time.time() - verified < 7 * 86400:
             return
         wid = mapping.meta("webhook_id")
-        try:
-            info = await upstream.client.get(f"/api/webhooks/{wid}")
-        except Exception as exc:  # noqa: BLE001
-            if getattr(getattr(exc, "response", None), "status_code", None) == 404:
-                logger.warning("release webhook vanished - falling back to timed re-checks")
-                mapping.set_meta("webhook_id", None)
-                mapping.invalidate_all()
-            return
+        with _call_scope("job", "verify_webhook", SYSTEM) as job:
+            try:
+                info = await upstream.client.get(f"/api/webhooks/{wid}")
+            except Exception as exc:  # noqa: BLE001 - the tool call must not fail because of this check
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                job["decision"] = "error"
+                job["audit"] = {"error": type(exc).__name__, "onshapeStatus": status}
+                if status == 404:
+                    logger.warning("release webhook vanished - falling back to timed re-checks")
+                    mapping.set_meta("webhook_id", None)
+                    mapping.invalidate_all()
+                return
         dropped = int(info.get("droppedEventCount") or 0) if isinstance(info, dict) else 0
         if dropped > int(mapping.meta("webhook_dropped") or 0):
             logger.warning(f"Onshape dropped {dropped} webhook events - invalidating mappings")
@@ -391,31 +456,16 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict | None) -> Any:
-        started = time.monotonic()
-        client = current_client.get()
         cls = tool_class(name) if name != POLICY_TOOL else META
         doc_id = (arguments or {}).get("documentId") if isinstance(arguments, dict) else None
         doc_id = doc_id if isinstance(doc_id, str) and len(doc_id) <= 64 else None
-        ctx = {"cls": cls, "doc": None, "requests": 0, "blocked": 0, "billed": 0}
-        token = _call_ctx.set(ctx)
+        with _call_scope("tool_call", name, cls, doc_id) as ctx:
+            return await _run_tool(ctx, name, cls, arguments)
 
-        def audit(decision: str, **extra: Any) -> None:
-            _audit(
-                client=client,
-                tool=name[:80],
-                cls=cls,
-                decision=decision,
-                document=doc_id,
-                onshape_requests=ctx["requests"],
-                blocked_requests=ctx["blocked"] or None,
-                ms=int((time.monotonic() - started) * 1000),
-                **extra,
-            )
-
+    async def _run_tool(ctx: dict, name: str, cls: str | None, arguments: dict | None) -> Any:
         try:
-            limiter.hit(client)
+            limiter.hit(current_client.get())
             if name == POLICY_TOOL:
-                audit("allowed")
                 return [TextContent(type="text", text=_policy_text()), _usage_line(ctx)]
 
             tools = await _published_tools()
@@ -451,22 +501,20 @@ def create_app(settings: Settings | None = None) -> Starlette:
             upstream_error = any(
                 isinstance(c, TextContent) and c.text.lstrip().lower().startswith("error") for c in result
             )
-            audit("allowed", upstream_error=upstream_error)
+            ctx["audit"]["upstream_error"] = upstream_error
             if upstream_error:
                 return CallToolResult(content=[*result, _usage_line(ctx)], isError=True)
             return [*result, _usage_line(ctx)]
         except (PolicyDenied, QuotaExceeded) as exc:
-            audit("denied", reason=str(exc)[:300])
+            ctx["decision"], ctx["audit"]["reason"] = "denied", str(exc)[:300]
             return _deny(f"Denied: {exc}", _usage_line(ctx))
         except TimeoutError:
-            audit("timeout")
+            ctx["decision"] = "timeout"
             return _deny(f"Onshape did not answer within {TOOL_TIMEOUT_SECONDS} s.", _usage_line(ctx))
         except Exception as exc:  # never leak internals to the client
             logger.exception(f"Unhandled error in tool {name}")
-            audit("error", error=type(exc).__name__)
+            ctx["decision"], ctx["audit"]["error"] = "error", type(exc).__name__
             return _deny("Internal server error while running the tool.", _usage_line(ctx))
-        finally:
-            _call_ctx.reset(token)
 
     security = None
     if settings.allowed_hosts:
@@ -507,116 +555,136 @@ def create_app(settings: Settings | None = None) -> Starlette:
     if links is not None:
         routes.append(Route("/dl/{token}/{filename}", endpoint=links.serve, methods=["GET", "HEAD"]))
 
-    if mapping is not None and settings.public_base_url:
+    if settings.public_base_url:
         routes.append(Route("/onshape/webhook/{secret}", endpoint=make_receiver(mapping), methods=["POST"]))
 
-        def _not_admin() -> Response | None:
-            client = current_client.get()
-            if client != ADMIN_LABEL:
-                logger.warning(f"admin_denied client={json.dumps(client)}")
+        def _not_admin(ctx: dict) -> Response | None:
+            if current_client.get() != ADMIN_LABEL:
+                ctx["decision"], ctx["audit"]["reason"] = "denied", "admin token required"
                 return JSONResponse({"error": "admin token required"}, status_code=403)
             return None
 
+        class _WebhookIdMissing(Exception):
+            pass
+
+        async def _register_webhooks() -> None:
+            if mapping.meta("webhook_id") and not mapping.meta("webhook_meta_id") \
+                    and not mapping.meta("webhook_meta_unsupported"):
+                # separate subscription for part-metadata changes (keeps the part-number index fresh)
+                cid = await extra._company()
+                url = f"{settings.public_base_url}/onshape/webhook/{mapping.webhook_secret()}"
+                try:
+                    meta_hook = await upstream.client.post("/api/webhooks", data={
+                        "companyId": cid, "events": [METADATA_EVENT], "url": url,
+                        "options": {"collapseEvents": True}, "isTransient": False,
+                        "description": "onshape-mcp-secure: part metadata changes",
+                    })
+                    mid = str(meta_hook.get("id") or "")
+                    if re.fullmatch(r"[0-9a-f]{24}", mid):
+                        mapping.set_meta("webhook_meta_id", mid)
+                        logger.info("metadata webhook registered")
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 400:  # not available company-wide -> daily re-index
+                        mapping.set_meta("webhook_meta_unsupported", "1")
+                        logger.info("metadata webhook not supported for company scope")
+                    else:
+                        raise
+            if not mapping.meta("webhook_id"):
+                cid = await extra._company()
+                url = f"{settings.public_base_url}/onshape/webhook/{mapping.webhook_secret()}"
+                created = await upstream.client.post("/api/webhooks", data={
+                    "companyId": cid, "events": RELEASE_EVENTS, "url": url,
+                    "options": {"collapseEvents": False}, "isTransient": False,
+                    "description": "onshape-mcp-secure: keep part/drawing mapping table fresh",
+                })
+                wid = str(created.get("id") or "")
+                if not re.fullmatch(r"[0-9a-f]{24}", wid):
+                    raise _WebhookIdMissing()
+                mapping.set_meta("webhook_id", wid)
+                mapping.set_meta("webhook_verified_at", str(time.time()))
+                mapping.set_meta("webhook_dropped", "0")
+                logger.info("release webhook registered")
+
         async def admin_webhook(request: Request) -> Response:
             """Admin token only: GET = status, POST = register the release webhook (once)."""
-            if (denied := _not_admin()) is not None:
-                return denied
-            logger.info(f"AUDIT admin_webhook method={request.method}")
-            ctx = {"cls": SYSTEM, "doc": None, "requests": 0, "blocked": 0}
-            token = _call_ctx.set(ctx)
-            try:
-                if request.method == "POST" and mapping.meta("webhook_id") and not mapping.meta("webhook_meta_id") \
-                        and not mapping.meta("webhook_meta_unsupported"):
-                    # separate subscription for part-metadata changes (keeps the part-number index fresh)
-                    cid = await extra._company()
-                    url = f"{settings.public_base_url}/onshape/webhook/{mapping.webhook_secret()}"
-                    try:
-                        meta_hook = await upstream.client.post("/api/webhooks", data={
-                            "companyId": cid, "events": [METADATA_EVENT], "url": url,
-                            "options": {"collapseEvents": True}, "isTransient": False,
-                            "description": "onshape-mcp-secure: part metadata changes",
-                        })
-                        mid = str(meta_hook.get("id") or "")
-                        if re.fullmatch(r"[0-9a-f]{24}", mid):
-                            mapping.set_meta("webhook_meta_id", mid)
-                            logger.info("metadata webhook registered")
-                    except httpx.HTTPStatusError as exc:
-                        if exc.response.status_code == 400:  # not available company-wide -> daily re-index
-                            mapping.set_meta("webhook_meta_unsupported", "1")
-                            logger.info("metadata webhook not supported for company scope")
-                        else:
-                            raise
-                if request.method == "POST" and not mapping.meta("webhook_id"):
-                    cid = await extra._company()
-                    url = f"{settings.public_base_url}/onshape/webhook/{mapping.webhook_secret()}"
-                    created = await upstream.client.post("/api/webhooks", data={
-                        "companyId": cid, "events": RELEASE_EVENTS, "url": url,
-                        "options": {"collapseEvents": False}, "isTransient": False,
-                        "description": "onshape-mcp-secure: keep part/drawing mapping table fresh",
-                    })
-                    wid = str(created.get("id") or "")
-                    if not re.fullmatch(r"[0-9a-f]{24}", wid):
-                        return JSONResponse({"error": "Onshape did not return a webhook id"}, status_code=502)
-                    mapping.set_meta("webhook_id", wid)
-                    mapping.set_meta("webhook_verified_at", str(time.time()))
-                    mapping.set_meta("webhook_dropped", "0")
-                    logger.info("release webhook registered")
-            except Exception as exc:  # noqa: BLE001
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                logger.warning(f"webhook registration failed: {type(exc).__name__} status={status}")
-                return JSONResponse({"error": "registration failed", "onshapeStatus": status}, status_code=502)
-            finally:
-                _call_ctx.reset(token)
-            return JSONResponse({
-                "registered": bool(mapping.meta("webhook_id")),
-                "metadataEvents": bool(mapping.meta("webhook_meta_id")),
-                "active": mapping.webhook_active(),
-                "lastEventAt": mapping.meta("webhook_last_event_at"),
-                "onshapeRequests": ctx["requests"],
-                "table": mapping.summary(),
-            })
+            with _call_scope("admin", "admin_webhook", SYSTEM) as ctx:
+                ctx["audit"]["method"] = request.method
+                if (denied := _not_admin(ctx)) is not None:
+                    return denied
+                try:
+                    if request.method == "POST":
+                        await _register_webhooks()
+                except _WebhookIdMissing:
+                    ctx["decision"], ctx["audit"]["reason"] = "error", "no webhook id"
+                    return JSONResponse({"error": "Onshape did not return a webhook id"}, status_code=502)
+                except Exception as exc:  # noqa: BLE001
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    ctx["decision"] = "error"
+                    ctx["audit"].update(error=type(exc).__name__, onshapeStatus=status)
+                    logger.warning(f"webhook registration failed: {type(exc).__name__} status={status}")
+                    return JSONResponse({"error": "registration failed", "onshapeStatus": status}, status_code=502)
+                return JSONResponse({
+                    "registered": bool(mapping.meta("webhook_id")),
+                    "metadataEvents": bool(mapping.meta("webhook_meta_id")),
+                    "active": mapping.webhook_active(),
+                    "lastEventAt": mapping.meta("webhook_last_event_at"),
+                    "onshapeCalls": ctx["billed"],
+                    "table": mapping.summary(),
+                })
 
         routes.append(Route("/admin/webhook", endpoint=admin_webhook, methods=["GET", "POST"]))
 
-        sync_state = {"last": 0.0}
+        def _sync_wait() -> float:
+            """Seconds until the next /admin/sync; the last start lives in mappings.db (AD-8)."""
+            try:
+                last = float(mapping.meta(SYNC_COOLDOWN_KEY) or 0)
+            except ValueError:
+                last = 0.0
+            wait = last + ADMIN_SYNC_COOLDOWN - time.time()
+            return wait if 0 < wait <= ADMIN_SYNC_COOLDOWN else 0  # a start time in the future is ignored
 
         async def admin_sync(request: Request) -> Response:
             """Admin token only, max. once per 10 min: sync released revisions (+ part->drawing links)."""
-            if (denied := _not_admin()) is not None:
-                return denied
-            if not re.fullmatch(r"\d{0,4}", request.query_params.get("maxParts", "")):
-                return JSONResponse({"error": "maxParts must be an integer"}, status_code=400)
-            wait = sync_state["last"] + ADMIN_SYNC_COOLDOWN - time.time()
-            if wait > 0:
-                return JSONResponse({"error": f"sync cooldown, retry in {int(wait) + 1} s"}, status_code=429)
-            sync_state["last"] = time.time()
-            logger.info(f"AUDIT admin_sync query={json.dumps(str(request.query_params))[:200]}")
-            ctx = {"cls": READ, "doc": None, "requests": 0, "blocked": 0, "billed": 0}
-            token = _call_ctx.set(ctx)
-            try:
-                q = request.query_params
-                doc = q.get("document")  # documentId or exact document name for drawing links
-                try:
-                    max_parts = max(0, min(int(q.get("maxParts", "0") or 0), 200))
-                except ValueError:
+            q = request.query_params
+            doc = q.get("document")  # documentId or exact document name for drawing links
+            with _call_scope("admin", "admin_sync", READ, doc) as ctx:
+                ctx["audit"]["maxParts"] = q.get("maxParts", "")[:8]
+                if (denied := _not_admin(ctx)) is not None:
+                    return denied
+                if not re.fullmatch(r"\d{0,4}", q.get("maxParts", "")):
+                    ctx["decision"], ctx["audit"]["reason"] = "denied", "bad maxParts"
                     return JSONResponse({"error": "maxParts must be an integer"}, status_code=400)
-                result: dict = {"revisions": await extra.sync_revisions()}
-                if max_parts:
-                    did = None
-                    if doc:
-                        did = doc if re.fullmatch(r"[0-9a-f]{24}", doc) else next(
-                            (p["documentId"] for p in mapping.released_parts() if p.get("documentName") == doc), None)
-                        if did is None:
-                            return JSONResponse({"error": f"unknown document {doc!r}"}, status_code=400)
-                    result["drawings"] = await extra.link_drawings(did, max_parts)
+                if (wait := _sync_wait()) > 0:
+                    ctx["decision"], ctx["audit"]["reason"] = "denied", "cooldown"
+                    return JSONResponse({"error": f"sync cooldown, retry in {int(wait) + 1} s"}, status_code=429)
+                mapping.set_meta(SYNC_COOLDOWN_KEY, str(time.time()))
+                max_parts = min(int(q.get("maxParts") or 0), 200)
+                try:
+                    result: dict = {"revisions": await extra.sync_revisions()}
+                    if max_parts:
+                        did = None
+                        if doc:
+                            did = doc if re.fullmatch(r"[0-9a-f]{24}", doc) else next(
+                                (p["documentId"] for p in mapping.released_parts() if p.get("documentName") == doc),
+                                None)
+                            if did is None:
+                                ctx["decision"], ctx["audit"]["reason"] = "denied", "unknown document"
+                                return JSONResponse({"error": f"unknown document {doc!r}"}, status_code=400)
+                        result["drawings"] = await extra.link_drawings(did, max_parts)
+                except QuotaExceeded as exc:
+                    ctx["decision"], ctx["audit"]["reason"] = "denied", str(exc)[:300]
+                    return JSONResponse({"error": str(exc), "onshapeCalls": ctx["billed"]}, status_code=429)
+                except Exception as exc:  # noqa: BLE001 - same answer and audit as /admin/webhook
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    ctx["decision"] = "error"
+                    ctx["audit"].update(error=type(exc).__name__, onshapeStatus=status)
+                    logger.warning(f"admin sync failed: {type(exc).__name__} status={status}")
+                    return JSONResponse({"error": "sync failed", "onshapeStatus": status,
+                                         "onshapeCalls": ctx["billed"]}, status_code=502)
                 result["onshapeCalls"] = ctx["billed"]
                 result["table"] = mapping.summary()
                 result["budget"] = budget.snapshot()
                 return JSONResponse(result)
-            except QuotaExceeded as exc:
-                return JSONResponse({"error": str(exc), "onshapeCalls": ctx["billed"]}, status_code=429)
-            finally:
-                _call_ctx.reset(token)
 
         routes.append(Route("/admin/sync", endpoint=admin_sync, methods=["POST"]))
 

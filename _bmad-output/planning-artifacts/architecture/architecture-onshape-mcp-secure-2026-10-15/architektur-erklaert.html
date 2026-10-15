@@ -1,0 +1,227 @@
+<title>Onshape-Brücke für ClickUp</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a technical-drawing sheet — title block header, then two reading tracks (Anwender / Entwickler) in one column */
+:root{
+  --paper:#f4f6f7; --sheet:#ffffff; --ink:#18232d; --muted:#5a6873; --line:#c9d2d8;
+  --accent:#1d5fa8; --accent-soft:#e3edf8; --warn:#9a5b00; --warn-soft:#fbf0dc; --ok:#2d6a3e; --ok-soft:#e2f1e6;
+  --display:"Archivo","Arial Narrow",Arial,sans-serif;
+  --body:"Source Sans 3","Segoe UI",system-ui,sans-serif;
+  --mono:"JetBrains Mono",Consolas,"Courier New",monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --paper:#0f151a; --sheet:#151d24; --ink:#e3e9ee; --muted:#9aa8b3; --line:#2c3a45;
+  --accent:#6ea8e8; --accent-soft:#1a2c40; --warn:#e2a64a; --warn-soft:#33270f; --ok:#7cc48f; --ok-soft:#16301f; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#0f151a; --sheet:#151d24; --ink:#e3e9ee; --muted:#9aa8b3; --line:#2c3a45;
+  --accent:#6ea8e8; --accent-soft:#1a2c40; --warn:#e2a64a; --warn-soft:#33270f; --ok:#7cc48f; --ok-soft:#16301f; color-scheme:dark}
+body{background:var(--paper);color:var(--ink);font:400 17px/1.6 var(--body)}
+.wrap{max-width:980px;margin:0 auto;padding-inline:20px;padding-block:28px 64px}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;line-height:1.2;margin:0}
+h1{font-size:clamp(28px,5vw,42px);font-weight:800;letter-spacing:-.01em}
+h2{font-size:26px;font-weight:700;margin-bottom:8px}
+h3{font-size:19px;font-weight:700}
+p{margin:0;max-width:68ch}
+code,.mono{font-family:var(--mono);font-size:.86em}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* title block */
+.sheet{background:var(--sheet);border:2px solid var(--ink)}
+.titleblock{display:grid;grid-template-columns:1fr auto;border-top:2px solid var(--ink)}
+.tb-cells{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.tb-cells div{border-right:1px solid var(--ink);padding:8px 12px;min-width:0}
+.tb-cells div:last-child{border-right:0}
+.tb-label{display:block;font:600 11px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.tb-val{font:600 15px/1.4 var(--mono)}
+.hero{padding:28px 24px 24px;display:grid;gap:14px}
+.hero p{font-size:19px;color:var(--muted)}
+nav{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}
+nav a{font:600 14px var(--display);text-decoration:none;border:1.5px solid var(--accent);padding:6px 14px;color:var(--accent)}
+nav a:hover{background:var(--accent-soft)}
+
+section{margin-top:44px;display:grid;gap:18px}
+.track{font:600 12px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px}
+.box{background:var(--sheet);border:1px solid var(--line);padding:18px 20px;display:grid;gap:8px;align-content:start;min-width:0}
+.box.ok{border-left:4px solid var(--ok)}
+.box.warn{border-left:4px solid var(--warn)}
+.ask{font-family:var(--mono);font-size:14px;background:var(--accent-soft);padding:8px 12px;border-radius:2px}
+ul{margin:0;padding-left:20px;display:grid;gap:6px}
+li{max-width:66ch}
+
+.budget{background:var(--sheet);border:1px solid var(--line);padding:20px;display:grid;gap:14px}
+.bars{display:grid;gap:10px}
+.bar{display:grid;grid-template-columns:90px 1fr 92px;align-items:center;gap:12px;font-variant-numeric:tabular-nums}
+.bar span:first-child{font-weight:600}
+.track-bar{height:12px;background:var(--paper);border:1px solid var(--line);position:relative}
+.fill{position:absolute;inset:0 auto 0 0;background:var(--accent)}
+.mark80{position:absolute;top:-4px;bottom:-4px;left:80%;border-left:2px dashed var(--warn)}
+.note{font-size:14px;color:var(--muted)}
+
+.diagram{background:var(--sheet);border:1px solid var(--line);padding:16px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:15px}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);background:var(--sheet)}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font:600 12px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);background:var(--paper)}
+td.id{font-family:var(--mono);font-weight:600;white-space:nowrap;color:var(--accent)}
+tr:last-child td{border-bottom:0}
+.pill{display:inline-block;font:600 11px var(--mono);padding:2px 8px;border:1px solid currentColor;letter-spacing:.04em;white-space:nowrap}
+.pill.on{color:var(--ok)} .pill.off{color:var(--warn)}
+footer{margin-top:48px;font-size:14px;color:var(--muted);border-top:1px solid var(--line);padding-top:14px}
+@media (max-width:640px){
+  .tb-cells{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .tb-cells div:nth-child(2){border-right:0}
+  .tb-cells div:nth-child(-n+2){border-bottom:1px solid var(--ink)}
+  .titleblock{grid-template-columns:1fr}
+  .bar{grid-template-columns:70px 1fr 80px}
+}
+</style>
+
+<div class="wrap">
+  <header class="sheet">
+    <div class="hero">
+      <h1>Onshape-Brücke für ClickUp</h1>
+      <p>Wie ClickUp-Agents Teile, Zeichnungen und STEP-Dateien aus Onshape holen, ohne das knappe API-Budget zu verbrauchen oder etwas am Modell zu ändern.</p>
+      <nav aria-label="Lesepfade">
+        <a href="#anwender">Für Konstruktion &amp; ClickUp</a>
+        <a href="#entwickler">Für Entwickler</a>
+      </nav>
+    </div>
+    <div class="titleblock">
+      <div class="tb-cells">
+        <div><span class="tb-label">System</span><span class="tb-val">onshape-mcp-secure</span></div>
+        <div><span class="tb-label">Status</span><span class="tb-val">live · fra</span></div>
+        <div><span class="tb-label">Zugriff</span><span class="tb-val">nur lesen</span></div>
+        <div><span class="tb-label">Stand</span><span class="tb-val">2026-10-15</span></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================== ANWENDER ===================== -->
+  <section id="anwender">
+    <span class="track">Lesepfad 1 · Konstruktion &amp; ClickUp-Nutzer</span>
+    <h2>Was du damit machen kannst</h2>
+    <p>Du fragst in ClickUp (Brain oder Super Agent) nach einem Teil. Der Agent fragt unseren Server, der Server fragt Onshape. Am besten startest du immer mit der Teilenummer.</p>
+
+    <div class="grid2">
+      <div class="box">
+        <h3>Teil finden</h3>
+        <p>Freigegebene und noch nicht freigegebene Teile, mit Link nach Onshape.</p>
+        <div class="ask">„Wo ist PRT-000583?“</div>
+      </div>
+      <div class="box">
+        <h3>Bild ansehen</h3>
+        <p>Screenshot eines Teils oder einer Baugruppe, direkt im Chat.</p>
+        <div class="ask">„Zeig mir PRT-000583 von oben.“</div>
+      </div>
+      <div class="box">
+        <h3>STEP herunterladen</h3>
+        <p>3D-Modell der freigegebenen Revision als Download-Link.</p>
+        <div class="ask">„STEP von PRT-000583 Rev B“</div>
+      </div>
+      <div class="box">
+        <h3>Zeichnung holen</h3>
+        <p>Zugehörige Zeichnung als PDF, DXF oder DWG.</p>
+        <div class="ask">„Zeichnung zu PRT-000583 als PDF“</div>
+      </div>
+    </div>
+
+    <div class="budget">
+      <h3>Warum der Agent manchmal sparsam ist</h3>
+      <p>Unser Onshape-Vertrag erlaubt der ganzen Firma rund <strong>2.500 API-Aufrufe pro Jahr</strong>. Jede Antwort zeigt am Ende, wie viele Aufrufe sie gekostet hat. Ab 80 % eines Limits kommt ein Warnhinweis.</p>
+      <div class="bars" role="img" aria-label="Server-Limits: 500 pro Tag, 600 pro Woche, 1000 pro Monat, 2400 pro Jahr; Warnschwelle bei 80 Prozent">
+        <div class="bar"><span>Tag</span><div class="track-bar"><div class="fill" style="width:20.8%"></div></div><span>500</span></div>
+        <div class="bar"><span>Woche</span><div class="track-bar"><div class="fill" style="width:25%"></div></div><span>600</span></div>
+        <div class="bar"><span>Monat</span><div class="track-bar"><div class="fill" style="width:41.7%"></div><div class="mark80"></div></div><span>1.000</span></div>
+        <div class="bar"><span>Jahr</span><div class="track-bar"><div class="fill" style="width:100%"></div><div class="mark80"></div></div><span>2.400</span></div>
+      </div>
+      <p class="note">Balken zeigen die Limits im Verhältnis zum Jahreslimit. Gestrichelt: Warnschwelle 80 %.</p>
+    </div>
+
+    <div class="grid2">
+      <div class="box ok">
+        <h3>So kostet es fast nichts</h3>
+        <ul>
+          <li>Mit Teilenummer fragen statt mit „such mal das Teil mit der Bohrung“.</li>
+          <li>Einmal geholte Dateien und Bilder wiederverwenden: Der Server merkt sich freigegebene Stände.</li>
+          <li>Wenn der Agent nachfragt, in welchem Dokument das Teil liegt: antworten statt ihn suchen lassen.</li>
+        </ul>
+      </div>
+      <div class="box warn">
+        <h3>Was bewusst nicht geht</h3>
+        <ul>
+          <li>Nichts in Onshape ändern: keine Skizzen, Features, Freigaben.</li>
+          <li>Dokumente durchstöbern oder „alles auflisten“.</li>
+          <li>Links auf Bilder und Downloads gelten nur 24 Stunden. Danach einfach neu fragen.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== ENTWICKLER ===================== -->
+  <section id="entwickler">
+    <span class="track">Lesepfad 2 · Entwickler</span>
+    <h2>Aufbau: ein Gateway mit festen Schichten</h2>
+    <p>Der Server ist ein <em>Policy-Enforcing Gateway</em> um das unveränderte Open-Source-Projekt hedless/onshape-mcp. Jede Anfrage läuft durch dieselben Schichten. Verbindlich ist die Spine <code>ARCHITECTURE-SPINE.md</code>; diese Seite fasst sie zusammen.</p>
+
+    <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  CU[ClickUp Agent] -- Bearer --> T[Transport /mcp]
+  T --> A[Auth]
+  A --> P[Policy: Klasse, Argumente, Dokumentzugriff]
+  P --> TL[Tools: Upstream + eigene]
+  TL --> S[(Mapping-DB und Caches auf /data)]
+  TL --> G[Call-Scope: Guard, Budget, Audit]
+  G --> O[(Onshape API)]
+  O -. Webhook: nur invalidieren .-> S
+</pre>
+    </div>
+
+    <h3>Die Regeln in Kurzform</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>ID</th><th>Regel</th></tr></thead>
+        <tbody>
+          <tr><td class="id">AD-1</td><td><code>src/onshape_mcp/</code> wird nie editiert; Änderungen nur im Wrapper.</td></tr>
+          <tr><td class="id">AD-2</td><td>Default deny: Ein Tool ohne Klasse in <code>TOOL_CLASSES</code> wird nicht veröffentlicht.</td></tr>
+          <tr><td class="id">AD-3</td><td>Jeder Onshape-Request läuft durch einen Call-Scope: Guard, Budget-Reservierung, JSON-Audit. Kein eigener HTTP-Client.</td></tr>
+          <tr><td class="id">AD-4</td><td>Budget zuerst: Mapping-DB → Cache → Onshape. Kein Erkunden, Single-Flight, Kosten in jeder Antwort.</td></tr>
+          <tr><td class="id">AD-5</td><td>Schreiben ist aus. Modellier-Tools bleiben gesperrt; Freigaben/Metadaten nur später, mit eigener Spec.</td></tr>
+          <tr><td class="id">AD-6</td><td>Die Mapping-DB ist einziger Eigentümer der Teile-Daten; eine Schreibfunktion pro Tabelle.</td></tr>
+          <tr><td class="id">AD-7</td><td>Webhooks invalidieren nur und erhöhen nie Vertrauen.</td></tr>
+          <tr><td class="id">AD-8</td><td>Genau eine Fly-Maschine mit Volume; Zustand, der Neustarts überleben muss, liegt auf <code>/data</code>.</td></tr>
+          <tr><td class="id">AD-9</td><td>Zwei Token-Rollen: Clients nur MCP, <code>/admin/*</code> nur mit Admin-Token.</td></tr>
+          <tr><td class="id">AD-10</td><td>Fail closed: restriktive Code-Defaults, generische Fehler, keine Secrets in Logs.</td></tr>
+          <tr><td class="id">AD-11</td><td>Neue Tools in ein Modul pro Fachbereich, mit einer gemeinsamen Registrierung.</td></tr>
+          <tr><td class="id">AD-12</td><td>Feste Cache-Ebenen: Fachdaten, unveränderliche Metadaten, Jobs, Dateien (24 h), Links.</td></tr>
+          <tr><td class="id">AD-13</td><td>Capability-Links: ≥192 Bit, max. 168 h, Sicherheits-Header, nur Präfix im Log.</td></tr>
+          <tr><td class="id">AD-14</td><td>Onshape-Daten und Agent-Eingaben gelten als nicht vertrauenswürdig; maximaler Schaden: lesen und Budget.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Betrieb</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Thema</th><th>Stand</th></tr></thead>
+        <tbody>
+          <tr><td>Deploy</td><td>Manuell mit KI: Tests grün → <code>fly deploy -a pikes-onshape-mcp --ha=false</code> → <code>/healthz</code></td></tr>
+          <tr><td>Umgebungen</td><td>Nur Produktion; Tests laufen gegen ein simuliertes Onshape</td></tr>
+          <tr><td>Backups</td><td><span class="pill on">AN</span> Fly-Volume-Snapshots, täglich, 5 Tage</td></tr>
+          <tr><td>Schreibzugriff</td><td><span class="pill off">AUS</span> <code>WRITE_MODE=off</code></td></tr>
+          <tr><td>Budget-Warnung</td><td>Hinweis in der Verbrauchszeile ab 80 % von Monat oder Jahr</td></tr>
+          <tr><td>Arbeitsweise</td><td>BMAD: <code>bmad-spec</code> → <code>bmad-build</code> → <code>bmad-code-review</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="box warn">
+      <h3>Offene Härtungspunkte</h3>
+      <p>Der Code weicht an 13 Stellen von der Spine ab (H-1 bis H-13). Der wichtigste: Die Code-Defaults für Schreiben, FeatureScript und SSE sind offen; in Produktion ist das nur über <code>fly.toml</code> abgesichert. Die Punkte werden über <code>bmad-spec</code> und <code>bmad-build</code> abgearbeitet.</p>
+    </div>
+  </section>
+
+  <footer>Quelle: <code>_bmad-output/planning-artifacts/architecture/architecture-onshape-mcp-secure-2026-10-15/ARCHITECTURE-SPINE.md</code> · Pikes GmbH</footer>
+</div>

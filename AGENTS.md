@@ -33,6 +33,7 @@ Hardened remote MCP server that gives ClickUp Brain / Super Agents read access t
 ## Running and verifying
 
 - Setup: `python -m venv .venv`, activate (Windows `.venv\Scripts\activate`), `pip install --require-hashes --no-deps -r requirements.txt && pip install pytest pytest-asyncio`.
+- On Windows: create the venv with Python 3.12 (`uv venv --python 3.12 .venv`; system Python is 3.13) and also install `pywin32==312 win32-setctime==1.2.0` — `requirements.txt` is hashed for the Linux image, and without them every test module fails to import.
 - `python -m pytest -q tests` must stay green; upstream: `PYTHONPATH=src python -m pytest -q upstream_tests`.
 - Deploy (after `fly auth login`) only with `fly deploy -a pikes-onshape-mcp --ha=false` (exactly one machine), then `curl https://pikes-onshape-mcp.fly.dev/healthz`. New tools appear in ClickUp only after refreshing the MCP connection.
 - `fly logs -a pikes-onshape-mcp` shows one `AUDIT` line per tool call; secrets via `fly secrets list` (names only).

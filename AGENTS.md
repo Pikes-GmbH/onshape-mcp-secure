@@ -18,6 +18,7 @@ Hardened remote MCP server that gives ClickUp Brain / Super Agents read access t
 - CSV exports pass every cell through `_csv_safe`.
 - Non-trivial work follows BMAD v6.12.4 (`_bmad/`, skills in `.claude/skills/bmad-*`, need `uv` on PATH, docs https://docs.bmad-method.org/): bug fix or small change → `bmad-spec` then `bmad-build`; larger feature → `bmad-brainstorming` or `bmad-product-brief` → `bmad-prd` → `bmad-architecture` → `bmad-create-epics-and-stories` → `bmad-sprint-planning`; after implementing → `bmad-code-review`; plan changes → `bmad-correct-course`; after an epic → `bmad-retrospective`; unsure → `bmad-help`. Skip BMAD only for trivial mechanical edits or pure ops (deploy, logs, secrets).
 - BMAD artefacts go to `_bmad-output/` and are committed; project knowledge lives in `docs/`.
+- Ideas Eric drops while we work ("Idee: …") are captured in `_bmad-output/ideas/backlog.md`, not implemented (global skill `ideen-backlog`); "Low-Hanging-Fruits" reviews that backlog.
 
 ## Where things are
 

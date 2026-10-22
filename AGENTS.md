@@ -39,6 +39,6 @@ Hardened remote MCP server that gives ClickUp Brain / Super Agents read access t
 - Deploy (after `fly auth login`) only with `fly deploy -a pikes-onshape-mcp --ha=false` (exactly one machine), then `curl https://pikes-onshape-mcp.fly.dev/healthz`. New tools appear in ClickUp only after refreshing the MCP connection.
 - `fly logs -a pikes-onshape-mcp` shows one `AUDIT` line per tool call; secrets via `fly secrets list` (names only).
 - `GET /admin/webhook` – webhook + table status (0 Onshape calls); `POST /admin/webhook` – register webhooks (once).
-- `POST /admin/sync` – pull new releases; `?document=<name>&maxParts=50` also links parts → drawings (~1 Onshape call per part).
+- `POST /admin/sync` – pull new releases; `?full=1` re-enumerates all latest revisions to refill latest pointers (~1 call per 100 revisions); `?document=<name>&maxParts=50` also links parts → drawings (~1 Onshape call per part).
 
 <!-- /bmad:context -->

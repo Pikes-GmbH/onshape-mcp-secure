@@ -878,3 +878,59 @@ def test_part_data_never_goes_to_the_kv_cache():
     assert not re.search(r"rev2:|whereused5|wu_pn_miss|mapping is None", src)
     kv_writes = re.findall(r"self\.kv\.set\(\s*([^,]+),", src)
     assert sorted(kv_writes) == ["key", "key", "pending_key"], kv_writes  # release package, version, pending job
+
+
+def _workflow_store(tmp_path):
+    from onshape_secure.mapping import MappingStore
+
+    m = MappingStore(str(tmp_path / "m.db"))
+    m.put_synced_revision({**_PART, "releaseId": "5" * 24})
+    m.put_synced_revision({**_PART, "partNumber": "PRT-2", "documentId": "7" * 24, "releaseId": "4" * 24})
+    m.put_drawings("PRT-2", "A", [])
+    m.put_whereused_miss("PRT-3")
+    m.put_whereused_miss("PRT-1")
+    m.set_doc_workspace(_HEX, "b" * 24, "Doc")
+    m.replace_ws_parts(_HEX, "b" * 24, [])
+    return m
+
+
+def _pointers(m):
+    return sorted({r[0] for r in m._q("SELECT part_number FROM latest WHERE revision IS NOT NULL")})
+
+
+def test_workflow_transition_invalidates_only_the_known_release(tmp_path):
+    m = _workflow_store(tmp_path)
+    assert m.on_workflow_transition("5" * 24, "RELEASE") == ("parts:1", {_HEX})
+    assert _pointers(m) == ["PRT-2"]  # other parts keep their pointer and drawing links
+    assert m.get_drawings("PRT-2", "A") == [] and m.whereused_miss("PRT-3") and not m.whereused_miss("PRT-1")
+    # a known package is enough, even without a (valid) type
+    m = _workflow_store(tmp_path / "b")
+    assert m.on_workflow_transition("4" * 24, None) == ("parts:1", {"7" * 24})
+    assert _pointers(m) == ["PRT-1"] and m.get_drawings("PRT-2", "A") is None
+
+
+def test_workflow_transition_of_known_drawing_release_drops_drawing_links(tmp_path):
+    m = _workflow_store(tmp_path)
+    m.put_synced_revision({**_DRAWING, "partNumber": "DRW-1", "releaseId": "3" * 24})
+    m.on_workflow_transition("3" * 24, "RELEASE")
+    assert m.get_drawings("PRT-2", "A") is None  # part -> drawing links may have changed
+    assert _pointers(m) == ["PRT-1", "PRT-2"]
+
+
+@pytest.mark.parametrize("object_id, object_type", [
+    ("1" * 24, "TASK"), (None, "TASK"), ("1" * 24, "ASSIGNMENT"), ("1" * 24, "RELEASE"),
+])
+def test_workflow_transition_without_release_data_keeps_table(tmp_path, object_id, object_type):
+    m = _workflow_store(tmp_path)
+    assert m.on_workflow_transition(object_id, object_type) == ("none", set())
+    assert _pointers(m) == ["PRT-1", "PRT-2"]
+    assert m.get_drawings("PRT-2", "A") == [] and m.whereused_miss("PRT-3")
+
+
+@pytest.mark.parametrize("object_id, object_type", [
+    ("1" * 24, "OBSOLETION"), ("1" * 24, None), ("1" * 24, "SOMETHING_NEW"), (None, "RELEASE"), (None, None),
+])
+def test_workflow_transition_unidentifiable_invalidates_all(tmp_path, object_id, object_type):
+    m = _workflow_store(tmp_path)
+    assert m.on_workflow_transition(object_id, object_type) == ("all", set())
+    assert _pointers(m) == [] and m.get_drawings("PRT-2", "A") is None and not m.whereused_miss("PRT-3")

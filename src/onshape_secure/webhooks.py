@@ -25,12 +25,15 @@ from .mapping import MappingStore
 MAX_BODY = 64 * 1024
 RELEASE_EVENTS = ["onshape.revision.created", "onshape.workflow.transition"]
 METADATA_EVENT = "onshape.model.lifecycle.metadata"
-_DOC_ID = re.compile(r"[0-9a-f]{24}")
+_HEX_ID = re.compile(r"[0-9a-f]{24}")
+
+
+def _hex_id(value: object) -> str | None:
+    return value if isinstance(value, str) and _HEX_ID.fullmatch(value) else None
 
 
 def _document_id(event: dict) -> str | None:
-    did = event.get("documentId")
-    return did if isinstance(did, str) and _DOC_ID.fullmatch(did) else None
+    return _hex_id(event.get("documentId"))
 
 
 def make_receiver(mapping: MappingStore):
@@ -56,13 +59,19 @@ def make_receiver(mapping: MappingStore):
             return JSONResponse({"ok": True})  # 200: Onshape must not retry or disable the hook
         mapping.set_meta("webhook_last_event_at", str(time.time()))
         did = _document_id(event)
+        scope = "-"
         # webhook.register / webhook.ping: nothing to do - payloads never raise trust (AD-7)
         if name == "onshape.revision.created":
             part_number = str(event.get("partNumber") or "")[:64] or None
             etype = event.get("elementType")
             mapping.on_revision_created(part_number, etype if isinstance(etype, int) else None)
         elif name == "onshape.workflow.transition":
-            mapping.invalidate_all()  # e.g. obsoletion - rare, re-lookups are cheap
+            otype = event.get("objectType")
+            scope, affected = mapping.on_workflow_transition(
+                _hex_id(event.get("objectId")), otype if isinstance(otype, str) else None
+            )
+            for doc in affected:
+                mapping.mark_doc_dirty(doc)
         if name in RELEASE_EVENTS and did:
             # state/revision in the working-state index changed; never mark all (budget)
             mapping.mark_doc_dirty(did)
@@ -71,10 +80,13 @@ def make_receiver(mapping: MappingStore):
             if did or not event.get("documentId"):
                 mapping.mark_doc_dirty(did)
         logger.info(
-            "webhook event={} part={} doc={}",
+            "webhook event={} part={} doc={} object={} transition={} invalidated={}",
             json.dumps(name),
             json.dumps(str(event.get("partNumber") or "-")[:64]),
             "yes" if did else "no",  # shows whether release events carry documentId
+            json.dumps(str(event.get("objectType") or "-")[:32]),  # workflow events: real values are undocumented
+            json.dumps(str(event.get("transitionName") or "-")[:64]),
+            scope,  # workflow events: parts:N | none | all; other events: -
         )
         return JSONResponse({"ok": True})
 

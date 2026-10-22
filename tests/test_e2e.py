@@ -1014,6 +1014,48 @@ async def test_release_webhook_marks_document_stale(server, tmp_path, name, docu
     assert fake.index_calls == (2 if reindexed else 1)
 
 
+@pytest.mark.parametrize("payload, refetched", [
+    ({"objectType": "RELEASE", "objectId": "5" * 24}, {"PRT-000800"}),  # known package: only its parts
+    ({"objectType": "TASK", "objectId": "1" * 24}, set()),
+    ({"objectType": "RELEASE", "objectId": "1" * 24}, set()),  # new release: revision.created follows
+    ({"objectType": "OBSOLETION", "objectId": "1" * 24}, {"PRT-000800", "PRT-000593"}),
+    ({}, {"PRT-000800", "PRT-000593"}),  # payload identifies nothing
+    ({"objectType": "RELEASE", "objectId": "abc"}, {"PRT-000800", "PRT-000593"}),  # malformed id: unusable
+    ({"objectType": "RELEASE", "objectId": 42}, {"PRT-000800", "PRT-000593"}),
+    ({"objectType": "TASK", "objectId": "5" * 24}, set()),  # a task never touches release data
+])
+async def test_workflow_webhook_invalidates_only_affected_parts(server, tmp_path, payload, refetched):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    parts = ("PRT-000800", "PRT-000593")
+    for pn in parts + ("PRT-000583",):  # the unreleased one indexes PROD_DOC
+        await _call(base, "find_part_by_number", {"partNumber": pn})
+    assert fake.index_calls == 1
+    hook = base + f"/onshape/webhook/{MappingStore(str(tmp_path / 'mappings.db')).webhook_secret()}"
+    event = {"event": "onshape.workflow.transition", "webhookId": "e" * 24, **payload}
+    assert httpx.post(hook, json=event).status_code == 200
+    for pn in parts:
+        n = len(fake.requests)
+        await _call(base, "find_part_by_number", {"partNumber": pn})
+        assert (len(fake.requests) > n) == (pn in refetched), pn
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    assert fake.index_calls == (2 if refetched == {"PRT-000800"} else 1)  # the known package's document is stale
+
+
+def test_workflow_webhook_log_shows_type_and_transition(server, tmp_path, capfd):
+    from onshape_secure.mapping import MappingStore
+
+    base, _ = server(log_level="INFO")
+    hook = base + f"/onshape/webhook/{MappingStore(str(tmp_path / 'mappings.db')).webhook_secret()}"
+    httpx.post(hook, json={"event": "onshape.workflow.transition", "objectType": "RELEASE", "objectId": "1" * 24,
+                           "transitionName": "SUBMIT\n2026-01-01 AUDIT forged"})
+    out = "".join(capfd.readouterr())
+    assert 'object="RELEASE" transition="SUBMIT\\n2026-01-01 AUDIT forged" invalidated=none' in out
+    assert "\n2026-01-01 AUDIT forged" not in out
+
+
 @pytest.mark.parametrize("extra, reindexed", [
     ({"documentId": "Z" * 24}, False), ({"documentId": "abc"}, False), ({"documentId": 42}, False),
     ({}, True), ({"documentId": None}, True), ({"documentId": ""}, True),
@@ -1120,7 +1162,7 @@ def test_batch_sync_builds_table_cheaply(server, monkeypatch):
     h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     assert httpx.post(base + "/admin/sync").status_code == 401
     res = httpx.post(base + "/admin/sync?document=Robot%20Gen3&maxParts=10", headers=h, timeout=30).json()
-    assert res["revisions"] == {"pages": 2, "revisionsStored": 2, "complete": True}
+    assert res["revisions"] == {"pages": 2, "revisionsStored": 2, "complete": True, "full": False}
     assert res["drawings"]["partsWithDrawing"] == 1
     paths = [p for _, p, _ in fake.requests]
     assert not any("/revisions/companies/c0mpany/d/" in p for p in paths)  # drawing revision came from the sync
@@ -1403,3 +1445,37 @@ def test_admin_sync_bad_requests_are_audited(server, capfd):
     assert httpx.post(base + "/admin/sync?maxParts=5&document=Nope", headers=h, timeout=30).status_code == 400
     reasons = [a.get("reason") for a in _audits(capfd.readouterr().err) if a["action"] == "admin_sync"]
     assert reasons == ["bad maxParts", "unknown document"]
+
+
+def test_full_sync_refills_latest_pointers(server, tmp_path):
+    from onshape_secure.app import SYNC_COOLDOWN_KEY
+    from onshape_secure.mapping import MappingStore
+
+    admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    base, fake = server()
+    m = MappingStore(str(tmp_path / "mappings.db"))
+
+    def sync(query=""):
+        m.set_meta(SYNC_COOLDOWN_KEY, "0")  # skip the cooldown between runs
+        return httpx.post(base + "/admin/sync" + query, headers=admin, timeout=30).json()
+
+    pointers = sync()["table"]["latest_pointers"]
+    assert pointers == 4  # typed + untyped pointer per revision
+    cursor = m.meta("rev_sync_after")
+    m.invalidate_all()  # e.g. an obsoletion event
+    again = sync("?full=0")
+    assert again["table"]["latest_pointers"] == 0 and fake.sync_pages[-1]["after"] == cursor  # only new ones
+    assert again["revisions"]["full"] is False
+    full = sync("?full=1")
+    assert full["table"]["latest_pointers"] == pointers and full["revisions"]["complete"] and full["revisions"]["full"]
+    assert fake.sync_pages[-2]["after"] == "2000-01-01T00:00:00Z"  # page 1 of the full run, then page 2
+    assert full["onshapeCalls"] == 2 and m.meta("rev_sync_after") == cursor  # cursor never moves backwards
+
+
+@pytest.mark.parametrize("value", ["true", "2", "abc"])
+def test_full_sync_rejects_bad_flag(server, value):
+    base, fake = server()
+    admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    resp = httpx.post(base + f"/admin/sync?full={value}", headers=admin, timeout=30)
+    assert resp.status_code == 400 and fake.requests == []
+    assert httpx.post(base + "/admin/sync", headers=admin, timeout=30).status_code == 200  # no cooldown spent

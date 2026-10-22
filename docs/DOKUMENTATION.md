@@ -116,6 +116,7 @@ Der Server führt eine eigene Tabelle aller Freigaben, Zeichnungen und indexiert
 **Wie die Tabelle aktuell bleibt:**
 
 - Onshape meldet neue Freigaben und geänderte Teilenummern per Webhook. Der Server löscht dann gezielt die betroffenen Einträge. Meldungen zählen nicht gegen das Budget.
+- Workflow-Meldungen (Freigabe- oder Obsoleszenz-Schritte) nennen nur das Freigabepaket, keine Teilenummer. Kennt der Server das Paket, löscht er nur dessen Teile (enthält es eine Zeichnung, zusätzlich alle Zeichnungs-Links). Aufgaben und neue Freigaben lassen die Tabelle unverändert (neue Freigaben kommen je Revision gesondert). Nur eine Obsoleszenz oder eine Meldung ohne erkennbares Objekt leert alle „letzte Revision“-Einträge und Zeichnungs-Links. Das Log zeigt dazu `invalidated=parts:N|none|all`.
 - Feste Revisionen ändern sich nie und bleiben dauerhaft gespeichert.
 - Alle Teile-Daten (Revisionen, „letzte Revision“, Zeichnungs-Links, Fehltreffer) stehen nur in dieser Tabelle. Gibt es zu einer Nummer ein Teil und eine Zeichnung, liefert die Suche ohne Typ das Teil, solange dessen Eintrag gültig ist (Sammelabruf und Einzelsuche folgen derselben Regel). Nach einer neuen Freigabe oder Ablauf der Gültigkeit kann sie bis zur nächsten Teile-Suche die Zeichnung liefern; die Antwort nennt dann den Typ `DRAWING`.
 - Fehltreffer der firmenweiten Where-Used-Suche merkt sich der Server 1 Stunde.
@@ -137,6 +138,7 @@ Der Server läuft als eine Fly.io-Maschine in Frankfurt (App `pikes-onshape-mcp`
 | Aufruf | Zweck | Onshape-Aufrufe |
 | --- | --- | --- |
 | `POST /admin/sync` | Alle neuen Freigaben in die Tabelle holen | 1 je 100 Freigaben |
+| `POST /admin/sync?full=1` | Alle aktuellen Freigaben neu holen, z. B. wenn in `GET /admin/webhook` `table.latest_pointers` weit unter `table.revisions` liegt (nach einer Obsoleszenz). Zeichnungs-Links danach mit `document=…&maxParts=…`. Nur von Hand, nicht einplanen | 1 je 100 Freigaben (heute ~5) |
 | `POST /admin/sync?document=<Name>&maxParts=50` | Zusätzlich Teil → Zeichnung für ein Dokument | ~1 pro Teil |
 | `POST /admin/webhook` | Onshape-Webhooks anmelden (einmalig) | 1 |
 | `GET /admin/webhook` | Webhook- und Tabellenstatus | 0 |

@@ -126,6 +126,9 @@ So wird gespart:
 ```bash
 # alle aktuellen Freigaben der Firma (1 Aufruf je 100 Revisionen, danach inkrementell)
 curl -X POST "https://pikes-onshape-mcp.fly.dev/admin/sync" -H "Authorization: Bearer $ADMIN_TOKEN"
+# alles neu aufzählen (füllt gelöschte „letzte Revision“-Zeiger wieder, ~1 Aufruf je 100 Revisionen, heute ~5;
+# Zeichnungs-Links danach über document=…&maxParts=…; nicht automatisch einplanen)
+curl -X POST "https://pikes-onshape-mcp.fly.dev/admin/sync?full=1" -H "Authorization: Bearer $ADMIN_TOKEN"
 # zusätzlich Teil -> Zeichnung für ein Dokument (Where Used, ~1 Aufruf pro freigegebenem Teil)
 curl -X POST "https://pikes-onshape-mcp.fly.dev/admin/sync?document=Robot%20Gen3&maxParts=50" -H "Authorization: Bearer $ADMIN_TOKEN"
 ```

@@ -33,3 +33,10 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-h-11-h-12-h-13-webhook-version-budget-warning-backups.md`
   summary: Wiederherstellung aus Fly-Snapshots ist nicht dokumentiert (Ablauf `fly volumes snapshots list` / `fly volumes create --snapshot-id`, WAL-Dateien von `mappings.db` mitnehmen, Budgetzähler springt bis zu 1 Tag zurück).
   evidence: Code-Review H-11..H-13 (Blind Hunter); Snapshots sind jetzt das erklärte Backup, Restore-Runbook fehlt.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-scoped-workflow-invalidation.md`
+  summary: Produktion hat nach dem Löschen am 2026-10-21 nur noch 1 von 429 Latest-Zeigern; `/admin/sync?full=1` ergänzen (ignoriert `rev_sync_after`, ⌈N/100⌉ ≈ 5 Calls), optional setzt `invalidate_all` den Cursor zurück – braucht Erics OK.
+  evidence: Der Fix verhindert weiteres Löschen durch RELEASE/TASK-Events, füllt die Zeiger aber nicht wieder; ein inkrementeller Sync holt nur Revisionen nach dem Cursor.
+- source_spec: `_bmad-output/implementation-artifacts/spec-scoped-workflow-invalidation.md`
+  summary: Jedes OBSOLETION-Workflow-Event (und jede Zeichnungsfreigabe in `on_revision_created`) löscht weiter alle Teil→Zeichnung-Links; eingrenzen, sobald echte `transitionName`-Werte im Log sichtbar sind.
+  evidence: Obsoleszenz-Pakete nennen keine Teilenummern, gespeicherte Revisionen sind älter als das Paket; Links neu aufbauen kostet ~1 Call pro Teil.

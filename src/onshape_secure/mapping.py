@@ -243,15 +243,45 @@ class MappingStore:
 
     # ---------------------------------------------------------------- invalidation (webhook)
 
+    def _invalidate_part(self, part_number: str) -> None:
+        self._q("DELETE FROM latest WHERE part_number=?", (part_number,))
+        self._q("DELETE FROM drawings WHERE part_number=?", (part_number,))
+        self._q("DELETE FROM whereused_misses WHERE part_number=?", (part_number,))
+
     def on_revision_created(self, part_number: str | None, element_type: int | None) -> None:
         if element_type == 2:  # a drawing was released: links part -> drawing may have changed
             self._q("DELETE FROM drawings")
         if part_number:
-            self._q("DELETE FROM latest WHERE part_number=?", (part_number,))
-            self._q("DELETE FROM drawings WHERE part_number=?", (part_number,))
-            self._q("DELETE FROM whereused_misses WHERE part_number=?", (part_number,))
+            self._invalidate_part(part_number)
         else:
             self.invalidate_all()
+
+    def on_workflow_transition(self, object_id: str | None, object_type: str | None) -> tuple[str, set[str]]:
+        """Invalidate what a workflow event touches; returns (scope for the log, affected document ids).
+
+        The payload names only the workflow object (package id and type), no part number or document.
+        A release package we stored revisions of is mapped back via their releaseId. Obsoletion packages
+        never match (stored revisions predate them), so an obsoletion still invalidates everything.
+        """
+        if object_type in ("TASK", "ASSIGNMENT"):
+            return "none", set()  # no release data involved
+        hits = []
+        if object_id:
+            for pn, et, info in self._q("SELECT part_number, element_type, info FROM revisions"):
+                d = json.loads(info)
+                if d.get("releaseId") == object_id:
+                    hits.append((pn, et, d.get("documentId")))
+        if hits:
+            if any(et == DRAWING_TYPE for _, et, _ in hits):
+                self._q("DELETE FROM drawings")
+            parts = {pn for pn, _, _ in hits}
+            for pn in parts:
+                self._invalidate_part(pn)
+            return f"parts:{len(parts)}", {did for _, _, did in hits if isinstance(did, str) and did}
+        if object_type == "RELEASE" and object_id:
+            return "none", set()  # a new release: revision.created follows per revision; lost events -> droppedEventCount
+        self.invalidate_all()  # obsoletion or unidentifiable payload: affected parts unknown without an API call
+        return "all", set()
 
     def invalidate_all(self) -> None:
         self._q("DELETE FROM latest")

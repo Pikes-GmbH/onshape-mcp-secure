@@ -1014,6 +1014,48 @@ async def test_release_webhook_marks_document_stale(server, tmp_path, name, docu
     assert fake.index_calls == (2 if reindexed else 1)
 
 
+@pytest.mark.parametrize("payload, refetched", [
+    ({"objectType": "RELEASE", "objectId": "5" * 24}, {"PRT-000800"}),  # known package: only its parts
+    ({"objectType": "TASK", "objectId": "1" * 24}, set()),
+    ({"objectType": "RELEASE", "objectId": "1" * 24}, set()),  # new release: revision.created follows
+    ({"objectType": "OBSOLETION", "objectId": "1" * 24}, {"PRT-000800", "PRT-000593"}),
+    ({}, {"PRT-000800", "PRT-000593"}),  # payload identifies nothing
+    ({"objectType": "RELEASE", "objectId": "abc"}, {"PRT-000800", "PRT-000593"}),  # malformed id: unusable
+    ({"objectType": "RELEASE", "objectId": 42}, {"PRT-000800", "PRT-000593"}),
+    ({"objectType": "TASK", "objectId": "5" * 24}, set()),  # a task never touches release data
+])
+async def test_workflow_webhook_invalidates_only_affected_parts(server, tmp_path, payload, refetched):
+    from onshape_secure.mapping import MappingStore
+
+    base, fake = server()
+    httpx.post(base + "/admin/webhook", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    parts = ("PRT-000800", "PRT-000593")
+    for pn in parts + ("PRT-000583",):  # the unreleased one indexes PROD_DOC
+        await _call(base, "find_part_by_number", {"partNumber": pn})
+    assert fake.index_calls == 1
+    hook = base + f"/onshape/webhook/{MappingStore(str(tmp_path / 'mappings.db')).webhook_secret()}"
+    event = {"event": "onshape.workflow.transition", "webhookId": "e" * 24, **payload}
+    assert httpx.post(hook, json=event).status_code == 200
+    for pn in parts:
+        n = len(fake.requests)
+        await _call(base, "find_part_by_number", {"partNumber": pn})
+        assert (len(fake.requests) > n) == (pn in refetched), pn
+    await _call(base, "find_part_by_number", {"partNumber": "PRT-000583"})
+    assert fake.index_calls == (2 if refetched == {"PRT-000800"} else 1)  # the known package's document is stale
+
+
+def test_workflow_webhook_log_shows_type_and_transition(server, tmp_path, capfd):
+    from onshape_secure.mapping import MappingStore
+
+    base, _ = server(log_level="INFO")
+    hook = base + f"/onshape/webhook/{MappingStore(str(tmp_path / 'mappings.db')).webhook_secret()}"
+    httpx.post(hook, json={"event": "onshape.workflow.transition", "objectType": "RELEASE", "objectId": "1" * 24,
+                           "transitionName": "SUBMIT\n2026-01-01 AUDIT forged"})
+    out = "".join(capfd.readouterr())
+    assert 'object="RELEASE" transition="SUBMIT\\n2026-01-01 AUDIT forged" invalidated=none' in out
+    assert "\n2026-01-01 AUDIT forged" not in out
+
+
 @pytest.mark.parametrize("extra, reindexed", [
     ({"documentId": "Z" * 24}, False), ({"documentId": "abc"}, False), ({"documentId": 42}, False),
     ({}, True), ({"documentId": None}, True), ({"documentId": ""}, True),

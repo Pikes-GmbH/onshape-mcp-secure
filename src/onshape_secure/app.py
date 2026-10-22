@@ -648,23 +648,30 @@ def create_app(settings: Settings | None = None) -> Starlette:
             return wait if 0 < wait <= ADMIN_SYNC_COOLDOWN else 0  # a start time in the future is ignored
 
         async def admin_sync(request: Request) -> Response:
-            """Admin token only, max. once per 10 min: sync released revisions (+ part->drawing links)."""
+            """Admin token only, max. once per 10 min: sync released revisions (+ part->drawing links).
+
+            ?full=1 re-enumerates all latest revisions instead of only new ones (ceil(N/100) calls).
+            """
             q = request.query_params
             doc = q.get("document")  # documentId or exact document name for drawing links
             with _call_scope("admin", "admin_sync", READ, doc) as ctx:
                 ctx["audit"]["maxParts"] = q.get("maxParts", "")[:8]
+                ctx["audit"]["full"] = q.get("full", "")[:8]
                 if (denied := _not_admin(ctx)) is not None:
                     return denied
                 if not re.fullmatch(r"\d{0,4}", q.get("maxParts", "")):
                     ctx["decision"], ctx["audit"]["reason"] = "denied", "bad maxParts"
                     return JSONResponse({"error": "maxParts must be an integer"}, status_code=400)
+                if q.get("full", "") not in ("", "0", "1"):
+                    ctx["decision"], ctx["audit"]["reason"] = "denied", "bad full"
+                    return JSONResponse({"error": "full must be 0 or 1"}, status_code=400)
                 if (wait := _sync_wait()) > 0:
                     ctx["decision"], ctx["audit"]["reason"] = "denied", "cooldown"
                     return JSONResponse({"error": f"sync cooldown, retry in {int(wait) + 1} s"}, status_code=429)
                 mapping.set_meta(SYNC_COOLDOWN_KEY, str(time.time()))
                 max_parts = min(int(q.get("maxParts") or 0), 200)
                 try:
-                    result: dict = {"revisions": await extra.sync_revisions()}
+                    result: dict = {"revisions": await extra.sync_revisions(full=q.get("full") == "1")}
                     if max_parts:
                         did = None
                         if doc:

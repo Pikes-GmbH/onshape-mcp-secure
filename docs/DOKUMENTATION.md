@@ -138,6 +138,7 @@ Der Server läuft als eine Fly.io-Maschine in Frankfurt (App `pikes-onshape-mcp`
 | Aufruf | Zweck | Onshape-Aufrufe |
 | --- | --- | --- |
 | `POST /admin/sync` | Alle neuen Freigaben in die Tabelle holen | 1 je 100 Freigaben |
+| `POST /admin/sync?full=1` | Alle aktuellen Freigaben neu holen, z. B. wenn in `GET /admin/webhook` `table.latest_pointers` weit unter `table.revisions` liegt (nach einer Obsoleszenz). Zeichnungs-Links danach mit `document=…&maxParts=…`. Nur von Hand, nicht einplanen | 1 je 100 Freigaben (heute ~5) |
 | `POST /admin/sync?document=<Name>&maxParts=50` | Zusätzlich Teil → Zeichnung für ein Dokument | ~1 pro Teil |
 | `POST /admin/webhook` | Onshape-Webhooks anmelden (einmalig) | 1 |
 | `GET /admin/webhook` | Webhook- und Tabellenstatus | 0 |

@@ -35,7 +35,7 @@
   evidence: Code-Review H-11..H-13 (Blind Hunter); Snapshots sind jetzt das erklärte Backup, Restore-Runbook fehlt.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-scoped-workflow-invalidation.md`
-  summary: Produktion hat nach dem Löschen am 2026-10-21 nur noch 1 von 429 Latest-Zeigern; `/admin/sync?full=1` ergänzen (ignoriert `rev_sync_after`, ⌈N/100⌉ ≈ 5 Calls), optional setzt `invalidate_all` den Cursor zurück – braucht Erics OK.
+  summary: [Erledigt 2026-10-22: `/admin/sync?full=1` gebaut, Ausführung in Produktion steht aus] Produktion hat nach dem Löschen am 2026-10-21 nur noch 1 von 429 Latest-Zeigern; `/admin/sync?full=1` ergänzen (ignoriert `rev_sync_after`, ⌈N/100⌉ ≈ 5 Calls), optional setzt `invalidate_all` den Cursor zurück – braucht Erics OK.
   evidence: Der Fix verhindert weiteres Löschen durch RELEASE/TASK-Events, füllt die Zeiger aber nicht wieder; ein inkrementeller Sync holt nur Revisionen nach dem Cursor.
 - source_spec: `_bmad-output/implementation-artifacts/spec-scoped-workflow-invalidation.md`
   summary: Jedes OBSOLETION-Workflow-Event (und jede Zeichnungsfreigabe in `on_revision_created`) löscht weiter alle Teil→Zeichnung-Links; eingrenzen, sobald echte `transitionName`-Werte im Log sichtbar sind.

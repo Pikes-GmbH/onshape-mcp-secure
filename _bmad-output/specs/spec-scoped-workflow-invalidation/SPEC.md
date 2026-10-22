@@ -30,6 +30,10 @@ Payload laut Onshape-OpenAPI (`BTWorkflowMessageBody`, abgerufen am 2026-10-22):
   - **intent:** Die Log-Zeile des Webhooks zeigt `objectType` und `transitionName` (JSON-escaped, gekürzt) sowie `invalidated=parts:N|none|all`. So werden die echten Werte und der gewählte Zweig im Produktionslog sichtbar. `docs/DOKUMENTATION.md` beschreibt die Regel.
   - **success:** Test: Die Felder erscheinen escaped im Log, und eingeschleuste Zeilenumbrüche erzeugen keine neue Logzeile.
 
+- **CAP-5**
+  - **intent:** `POST /admin/sync?full=1` ignoriert den Cursor `rev_sync_after` und zählt alle aktuellen Revisionen neu auf. Das füllt die `latest`-Zeiger wieder; Zeichnungslinks brauchen weiter `document=…&maxParts=…` (~1 Call pro Teil). Der Cursor läuft dabei nie rückwärts. Es gelten dasselbe Admin-Token und derselbe 10-Minuten-Cooldown. `full` muss 0 oder 1 sein, sonst gibt es 400. Das Audit vermerkt `full`. Kosten: ⌈N/100⌉ Calls, maximal 50 Seiten; heute sind das ca. 5.
+  - **success:** E2E: Nach einem inkrementellen Sync holt `full=1` wieder ab 2000-01-01 und stellt gelöschte Zeiger wieder her; ein ungültiges `full` gibt 400 ohne Onshape-Call.
+
 ## Constraints
 
 - AD-7: Webhooks löschen oder markieren nur. Sie schreiben keine Fachdaten, setzen keine Vertrauensmarker und rufen Onshape nie auf.
@@ -38,7 +42,7 @@ Payload laut Onshape-OpenAPI (`BTWorkflowMessageBody`, abgerufen am 2026-10-22):
 
 ## Non-goals
 
-- Kein Full-Sync in diesem Paket (Vorschlag siehe Open questions).
+- Kein automatischer Cursor-Reset in `invalidate_all`: Der Full-Sync bleibt eine bewusste Admin-Aktion.
 - Kein Pauschal-Löschen aller Zeichnungslinks bei Zeichnungsfreigabe in `on_revision_created` umbauen.
 - Veraltetes `isObsolete` in gecachten Revisionszeilen wird hier nicht korrigiert.
 - Kein Deploy, kein Push, kein Commit ohne Erics OK.
@@ -51,7 +55,3 @@ Payload laut Onshape-OpenAPI (`BTWorkflowMessageBody`, abgerufen am 2026-10-22):
 
 - Ein bereits freigegebenes Release-Paket ändert über weitere Transitions keine freigegebenen Daten. Unbekannte `RELEASE`-IDs brauchen deshalb keine Invalidierung.
 - Die Werte von `transitionName` sind nicht dokumentiert. Deshalb trifft der Code damit noch keine Entscheidung, sondern loggt sie nur (CAP-4).
-
-## Open questions
-
-- **Vorschlag an Eric:** `POST /admin/sync?full=1` ignoriert den Cursor `rev_sync_after` und zählt alle aktuellen Revisionen neu auf (`latestOnly`, 100 pro Seite). Das füllt die `latest`-Zeiger wieder und aktualisiert `isObsolete`. Kosten: ⌈N/100⌉ Calls, heute ca. 5 bei 429 Revisionen; der Cap liegt bei 50 Seiten. Optional setzt `invalidate_all` den Cursor zurück, sodass der nächste Sync automatisch voll läuft. Zeichnungslinks brauchen weiter `link_drawings` (1 Call pro Teil). Umsetzung erst nach OK.

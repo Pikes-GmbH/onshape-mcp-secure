@@ -1162,7 +1162,7 @@ def test_batch_sync_builds_table_cheaply(server, monkeypatch):
     h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     assert httpx.post(base + "/admin/sync").status_code == 401
     res = httpx.post(base + "/admin/sync?document=Robot%20Gen3&maxParts=10", headers=h, timeout=30).json()
-    assert res["revisions"] == {"pages": 2, "revisionsStored": 2, "complete": True}
+    assert res["revisions"] == {"pages": 2, "revisionsStored": 2, "complete": True, "full": False}
     assert res["drawings"]["partsWithDrawing"] == 1
     paths = [p for _, p, _ in fake.requests]
     assert not any("/revisions/companies/c0mpany/d/" in p for p in paths)  # drawing revision came from the sync
@@ -1445,3 +1445,37 @@ def test_admin_sync_bad_requests_are_audited(server, capfd):
     assert httpx.post(base + "/admin/sync?maxParts=5&document=Nope", headers=h, timeout=30).status_code == 400
     reasons = [a.get("reason") for a in _audits(capfd.readouterr().err) if a["action"] == "admin_sync"]
     assert reasons == ["bad maxParts", "unknown document"]
+
+
+def test_full_sync_refills_latest_pointers(server, tmp_path):
+    from onshape_secure.app import SYNC_COOLDOWN_KEY
+    from onshape_secure.mapping import MappingStore
+
+    admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    base, fake = server()
+    m = MappingStore(str(tmp_path / "mappings.db"))
+
+    def sync(query=""):
+        m.set_meta(SYNC_COOLDOWN_KEY, "0")  # skip the cooldown between runs
+        return httpx.post(base + "/admin/sync" + query, headers=admin, timeout=30).json()
+
+    pointers = sync()["table"]["latest_pointers"]
+    assert pointers == 4  # typed + untyped pointer per revision
+    cursor = m.meta("rev_sync_after")
+    m.invalidate_all()  # e.g. an obsoletion event
+    again = sync("?full=0")
+    assert again["table"]["latest_pointers"] == 0 and fake.sync_pages[-1]["after"] == cursor  # only new ones
+    assert again["revisions"]["full"] is False
+    full = sync("?full=1")
+    assert full["table"]["latest_pointers"] == pointers and full["revisions"]["complete"] and full["revisions"]["full"]
+    assert fake.sync_pages[-2]["after"] == "2000-01-01T00:00:00Z"  # page 1 of the full run, then page 2
+    assert full["onshapeCalls"] == 2 and m.meta("rev_sync_after") == cursor  # cursor never moves backwards
+
+
+@pytest.mark.parametrize("value", ["true", "2", "abc"])
+def test_full_sync_rejects_bad_flag(server, value):
+    base, fake = server()
+    admin = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    resp = httpx.post(base + f"/admin/sync?full={value}", headers=admin, timeout=30)
+    assert resp.status_code == 400 and fake.requests == []
+    assert httpx.post(base + "/admin/sync", headers=admin, timeout=30).status_code == 200  # no cooldown spent

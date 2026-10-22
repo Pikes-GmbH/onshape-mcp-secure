@@ -933,15 +933,20 @@ class ExtraTools:
 
     # ------------------------------------------------------------------ batch (admin only)
 
-    async def sync_revisions(self, max_pages: int = 50) -> dict:
-        """All latest released revisions of the company: 1 call per 100 revisions, incremental."""
+    async def sync_revisions(self, max_pages: int = 50, full: bool = False) -> dict:
+        """All latest released revisions of the company: 1 call per 100 revisions, incremental.
+
+        `full` ignores the cursor and enumerates everything again (refills latest pointers after an
+        invalidation; drawing links stay with link_drawings); the cursor never moves backwards.
+        """
         cid = await self._company()
-        after = self.mapping.meta("rev_sync_after") or "2000-01-01T00:00:00Z"
+        cursor = self.mapping.meta("rev_sync_after") or "2000-01-01T00:00:00Z"
+        after = "2000-01-01T00:00:00Z" if full else cursor
         path = f"/api/revisions/companies/{quote(cid, safe='')}"
         params: dict | None = {"latestOnly": "true", "limit": 100, "after": after}
         base = self.web_base_url + "/api/"
         pages = stored = 0
-        newest = after
+        newest = cursor
         while path and pages < max_pages:
             data = await self.client.get(path, params=params)
             pages += 1
@@ -959,7 +964,7 @@ class ExtraTools:
         complete = path is None
         if complete:
             self.mapping.set_meta("rev_sync_after", newest)
-        return {"pages": pages, "revisionsStored": stored, "complete": complete}
+        return {"pages": pages, "revisionsStored": stored, "complete": complete, "full": full}
 
     async def link_drawings(self, document_id: str | None, max_parts: int) -> dict:
         """Where Used per released part (1 call each) -> part->drawing links; drawing data from the sync."""
